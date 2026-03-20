@@ -16,14 +16,21 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-l(zh$)@+c&r8+#d-_dkcnrx0l@5(&8^-6zm_l*8j11y&*otlnw'
+SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-l(zh$)@+c&r8+#d-_dkcnrx0l@5(&8^-6zm_l*8j11y&*otlnw")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "True") == "True"
 
 ALLOWED_HOSTS = []
 
