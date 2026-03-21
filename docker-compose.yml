@@ -1,0 +1,31 @@
+services:
+
+  db:
+    image: postgres:15
+    container_name: eventops_db
+    restart: always
+    environment:
+      POSTGRES_DB: eventops
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7
+    container_name: eventops_redis
+    ports:
+      - "6379:6379"
+
+  web:
+    build: .
+    container_name: eventops_web
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
