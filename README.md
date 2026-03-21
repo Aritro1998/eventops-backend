@@ -48,7 +48,7 @@ This project focuses on solving real-world backend challenges like:
 ### 1️⃣ Clone the repository
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Aritro1998/eventops-backend.git
 cd eventops-backend
 ```
 
