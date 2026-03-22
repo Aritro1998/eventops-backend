@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     "events",
     "bookings",
     "workflows",
+    "rest_framework",
 ]
 
 MIDDLEWARE = [
