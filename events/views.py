@@ -1,5 +1,5 @@
 from django.shortcuts import render
-from django.db.models import Count, Q
+from django.db.models import Count, Q, F
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.filters import OrderingFilter
 from rest_framework.permissions import AllowAny
@@ -28,9 +28,11 @@ class EventViewSet(ModelViewSet):
         if self.action in ['list', 'retrieve']:
             # Annotate the queryset with available seats for both list and retrieve actions
             return self.queryset.annotate(
-                available_seats= Count(
-                    'seats', 
-                    filter=Q(seats__is_booked=False))
+                confirmed_bookings=Count(
+                    'booking',
+                    filter=Q(booking__status='CONFIRMED')
+                ),
+                available_seats=F('total_seats') - F('confirmed_bookings')
             )
         return self.queryset
     
