@@ -35,7 +35,6 @@ class Event(models.Model):
 class Seat(models.Model):
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='seats')
     seat_number = models.IntegerField()
-    is_booked = models.BooleanField(default=False, db_index=True)
 
     def __str__(self):
         return f'Seat {self.seat_number} (Event {self.event_id})'
@@ -52,10 +51,6 @@ class Seat(models.Model):
                 condition=Q(seat_number__gt=0), 
                 name='seat_number_positive'
             ),
-        ]
-        # Composite Index to optimize queries filtering by event and booking status
-        indexes = [
-            models.Index(fields=['event', 'is_booked']),
         ]
         
             

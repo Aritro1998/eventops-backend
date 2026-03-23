@@ -10,7 +10,6 @@ class EventReadSerializer(serializers.ModelSerializer):
     # def get_available_seats(self, obj):
     #     return obj.seats.filter(is_booked=False).count()
 
-
     # This is an optimized field that relies on the annotation in the queryset to get available seats
     available_seats = serializers.IntegerField(read_only=True)
 
@@ -23,6 +22,26 @@ class EventReadSerializer(serializers.ModelSerializer):
             'end_time',
             'total_seats',
             'available_seats'
+        ]
+
+
+class EventSummerySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Event
+        fields = [
+            'id',
+            'name',
+            'start_time',
+            'end_time',
+        ]
+
+
+class SeatSummerySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Seat
+        fields = [
+            'id',
+            'seat_number',
         ]
 
 
