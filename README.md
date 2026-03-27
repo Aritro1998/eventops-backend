@@ -12,32 +12,72 @@ This project focuses on solving real-world backend challenges like:
 
 ## 🧱 Tech Stack
 
-* **Backend:** Django, Django REST Framework (DRF)
+* **Backend:** Django 6.0, Django REST Framework
+* **Auth:** JWT (djangorestframework-simplejwt)
 * **Database:** PostgreSQL
-* **Cache / Queue (planned):** Redis
+* **Cache / Queue placeholder:** Redis
 * **Containerization:** Docker & Docker Compose
 
 ---
 
-## ✨ Features
+## ✨ Implemented Capabilities
 
-### ✅ Implemented
+### ✅ Authentication & Users
 
-* Dockerized multi-service setup (Django + Postgres + Redis)
-* Environment-based configuration using `.env`
-* Production-style service startup with entrypoint script
+* `POST /api/auth/register/` with `username`, `email`, `password`
+* `POST /api/auth/token/` for access + refresh tokens
+* `POST /api/auth/token/refresh/`
+* `users.User` includes `role` (`ADMIN`, `ORGANIZER`, `USER`)
 
-### 🚧 In Progress
+### ✅ Event Management
 
-* Event management APIs
-* Seat booking system with **row-level locking**
-* Validation layer using DRF serializers
+* CRUD via `api/events/` using `EventViewSet`
+  * `GET /api/events/`
+  * `GET /api/events/{id}/`
+  * `POST /api/events/` (admin/organizer only)
+  * `PUT/PATCH/DELETE` with `IsAdminOrOrganizer`
+* `available_seats` is annotated in read responses
+* Event creation auto-generates seats (`events.Seat`) from `total_seats`
+* Event total seats update adjusts seats safely with transaction lock
+* model constraints:
+  * `total_seats > 0`
+  * `end_time > start_time`
+  * unique `seat_number` per event
 
-### 🔜 Planned
+### ✅ Booking System
 
-* Concurrency-safe booking (`select_for_update`)
+* `POST /api/bookings/` with:
+  * `event`, `seat`, `amount`, `idempotency_key`
+* Idempotency + repeatable client safety:
+  * first checks `user + idempotency_key`
+  * re-checks inside `transaction.atomic()`
+* Row-level locking via `Seat.objects.select_for_update()`
+* CONFIRMED seat uniqueness enforced at DB level
+* `GET /api/bookings/` (user scope + optional `?status=` filter + pagination)
+* `GET /api/bookings/{id}/`
+* `POST /api/bookings/{id}/cancel/` sets `CANCELLED`
+* `Booking` model constraints:
+  * unique `(idempotency_key, user)`
+  * unique confirmed seat
+
+### ✅ Infrastructure
+
+* `Dockerfile` and `docker-compose.yml` with `db`, `redis`, `web`
+* `entrypoint.sh` waits for PostgreSQL, runs migrations, starts Django dev server
+* Environment-driven settings in `core/settings.py`
+* Custom pagination in `core/pagination.py`
+
+### ✅ Postman Support
+
+* `EventOps.postman_collection.json`
+* `event_ops.postman_environment.json`
+
+---
+
+## 🚧 In Progress
+
 * Workflow job system (async processing with retries)
-* Role-Based Access Control (RBAC)
+* Role-Based Access Control (RBAC) beyond events
 * API rate limiting, filtering, pagination
 * Analytics endpoints (revenue, bookings, etc.)
 
@@ -45,23 +85,18 @@ This project focuses on solving real-world backend challenges like:
 
 ## ⚙️ Local Setup (Docker)
 
-### 1️⃣ Clone the repository
+1. Clone:
 
 ```bash
 git clone https://github.com/Aritro1998/eventops-backend.git
 cd eventops-backend
 ```
 
----
-
-### 2️⃣ Create `.env` file
-
-Create a `.env` file in the project root:
+2. Create `.env`:
 
 ```env
 DEBUG=True
 SECRET_KEY=dev-secret-key
-
 DB_NAME=eventops
 DB_USER=postgres
 DB_PASSWORD=postgres
@@ -69,87 +104,35 @@ DB_HOST=db
 DB_PORT=5432
 ```
 
----
-
-### 3️⃣ Build and start services
+3. Build and run:
 
 ```bash
 docker compose up --build
 ```
 
----
+`entrypoint.sh` handles:
+* waiting for Postgres on `db:5432`
+* `python manage.py makemigrations`
+* `python manage.py migrate`
+* `python manage.py runserver 0.0.0.0:8000`
 
-### 4️⃣ Run migrations (first time only)
-
-```bash
-docker compose exec web python manage.py migrate
-```
-
----
-
-### 5️⃣ Create superuser
+4. Create superuser (optional):
 
 ```bash
 docker compose exec web python manage.py createsuperuser
 ```
 
----
+5. Open:
+* App: `http://localhost:8000`
+* Admin: `http://localhost:8000/admin`
 
-### 6️⃣ Access the application
-
-* App: http://localhost:8000
-* Admin: http://localhost:8000/admin
-
----
-
-## 🧠 Architecture Overview
-
-```text
-Client → Django (API Layer)
-              ↓
-        Business Logic (Services)
-              ↓
-        ORM Layer (QuerySets)
-              ↓
-         PostgreSQL Database
-              ↓
-        Redis (Async / Caching)
-```
+6. Import Postman collection and environment:
+* Open Postman and import `EventOps.postman_collection.json` and `event_ops.postman_environment.json`
+* Set the environment to `event_ops` and update the base URL to `http://localhost:8000` if needed.
 
 ---
 
-## 🔥 Key Design Highlights
-
-### 1️⃣ Concurrency-Safe Booking
-
-* Uses **database transactions**
-* Implements **row-level locking (`select_for_update`)**
-* Prevents **race conditions and double booking**
-
----
-
-### 2️⃣ Clean Backend Architecture
-
-```text
-Views → Services → QuerySets → Database
-```
-
-* Thin views
-* Business logic isolated in services
-* Reusable query logic via custom QuerySets
-
----
-
-### 3️⃣ Production-Oriented Setup
-
-* Dockerized environment
-* Service dependency handling (DB readiness)
-* Environment-based configuration
-* Ready for async workflows (Celery + Redis)
-
----
-
-## 🧪 Future Enhancements
+## 🔜 Future Enhancements
 
 * Payment integration
 * Dynamic pricing engine
@@ -167,6 +150,7 @@ This project is designed to demonstrate:
 * Ability to handle **real-world concurrency issues**
 * Knowledge of **system design and architecture**
 * Experience with **production-like environments**
+
 
 
 
