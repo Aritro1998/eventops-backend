@@ -192,13 +192,13 @@ class BookingCancelView(APIView):
             Booking.objects.select_related("event", "seat"), id=booking_id, user=request.user
         )
 
-        if booking.status != Booking.status.CONFIRMED:
+        if booking.status != "CONFIRMED":
             return Response(
-                {"detail": "Booking is already cancelled."},
+                {"detail": "Only CONFIRMED bookings can be CANCELLED."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        booking.status = Booking.status.CANCELLED
+        booking.status = "CANCELLED"
         booking.save()
 
         serializer = BookingReadSerializer(booking)
