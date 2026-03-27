@@ -1,15 +1,18 @@
-from django.shortcuts import render
+from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from django.shortcuts import get_object_or_404
 from django.db import transaction, IntegrityError
+from rest_framework.permissions import IsAuthenticated
 
-from .serializers import BookingWriteSerializer, BookingReadSerializer
 from .models import Booking
 from events.models import Seat
+from core.pagination import CustomPagination
+from .serializers import BookingWriteSerializer, BookingReadSerializer
 
 # Create your views here.
-class BookingCreateView(APIView):
+class BookingListView(APIView):
+    permission_classes = [IsAuthenticated]
 
     def get_existing_booking(self, user, key):
         return Booking.objects.select_related("event", "seat").filter(
@@ -139,3 +142,72 @@ class BookingCreateView(APIView):
             BookingReadSerializer(booking).data,
             status=status.HTTP_201_CREATED
         )
+    
+    def get(self, request):
+        booking = Booking.objects.filter(user=request.user)
+        valid_statuses = [choice[0] for choice in Booking.STATUS_CHOICES]
+
+        # Optional filtering by status (e.g., ?status=CONFIRMED)
+        status_param = request.query_params.get("status")
+        if status_param:
+            if status_param not in valid_statuses:
+                return Response(
+                    {"detail": f"Invalid status filter. Valid options: {valid_statuses}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            booking = booking.filter(status=status_param)
+
+        # Optimize query with select_related to avoid N+1 problem
+        booking = booking.select_related("event", "seat")
+
+        # Apply pagination
+        paginator = CustomPagination()
+        paginated_booking = paginator.paginate_queryset(booking, request)
+
+        # If pagination is applied, return paginated response
+        if paginated_booking is not None:
+            serializer = BookingReadSerializer(paginated_booking, many=True)
+            return paginator.get_paginated_response(serializer.data)
+
+        serializer = BookingReadSerializer(booking, many=True)
+        return Response(serializer.data)
+    
+
+class BookingDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, booking_id):
+        booking = get_object_or_404(
+            Booking.objects.select_related("event", "seat"), id=booking_id, user=request.user
+        )
+        serializer = BookingReadSerializer(booking)
+        return Response(serializer.data)
+
+
+class BookingCancelView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, booking_id):
+        booking = get_object_or_404(
+            Booking.objects.select_related("event", "seat"), id=booking_id, user=request.user
+        )
+
+        if booking.status != Booking.status.CONFIRMED:
+            return Response(
+                {"detail": "Booking is already cancelled."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        booking.status = Booking.status.CANCELLED
+        booking.save()
+
+        serializer = BookingReadSerializer(booking)
+        return Response(serializer.data)
+
+
+# class BookingListView(ListAPIView):
+#     serializer_class = BookingReadSerializer
+#     permission_classes = [IsAuthenticated]
+
+#     def get_queryset(self):
+#         return Booking.objects.filter(user=self.request.user).select_related("event", "seat")

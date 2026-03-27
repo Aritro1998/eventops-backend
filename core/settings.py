@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from django.db import connections
 from pathlib import Path
+from datetime import timedelta
 
 print("SETTINGS FILE LOADED")
 
@@ -42,11 +43,11 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     "rest_framework",
+    "rest_framework_simplejwt",
     "users",
     "events",
     "bookings",
     "workflows",
-    "rest_framework",
 ]
 
 MIDDLEWARE = [
@@ -91,6 +92,18 @@ DATABASES = {
         "HOST": os.getenv("DB_HOST"),
         "PORT": os.getenv("DB_PORT"),
     }
+}
+
+# Rest Framework & JWT Settings
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ),
+}
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
+    "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
 
