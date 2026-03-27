@@ -11,7 +11,21 @@ from core.permissions import IsAdminOrOrganizer
 # Create your views here.
 class EventViewSet(ModelViewSet):
     """
-    CRUD API for events with optimized read operations including available seat count.
+    CRUD viewset for managing events with available seats annotation.
+    This viewset provides the following features:
+    1. List and Retrieve with Available Seats:
+       - Both list and retrieve actions return the number of available seats for each event.
+       - This is achieved by annotating the queryset with a count of confirmed bookings and calculating available seats on the fly.
+    2. Create and Update:
+       - Allows creation and updating of events with appropriate permissions.
+       - The available seats count is not relevant for create/update operations, so it is only annotated for read operations.
+    3. Ordering:
+       - Supports ordering events by start_time for better client-side sorting.
+    4. Permissions:
+       - Read operations (list/retrieve) are open to all users.
+       - Write operations (create/update/destroy) are restricted to authenticated users with admin or organizer roles.
+    5. Performance:
+       - Uses select_related and annotations to minimize database queries and optimize performance for read operations.
     """
     queryset = Event.objects.all()
     serializer_class = EventReadSerializer
@@ -29,8 +43,8 @@ class EventViewSet(ModelViewSet):
             # Annotate the queryset with available seats for both list and retrieve actions
             return self.queryset.annotate(
                 confirmed_bookings=Count(
-                    'booking',
-                    filter=Q(booking__status='CONFIRMED')
+                    'bookings',
+                    filter=Q(bookings__status='CONFIRMED')
                 ),
                 available_seats=F('total_seats') - F('confirmed_bookings')
             )
