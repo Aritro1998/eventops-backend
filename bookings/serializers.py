@@ -9,10 +9,9 @@ class BookingWriteSerializer(serializers.ModelSerializer):
         fields = [
             'event',
             'seat',
-            'amount',
             'idempotency_key',
         ]
-        read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'status']
+        read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'status', 'amount']
 
     def validate(self, data):
         event = data.get('event')
@@ -25,7 +24,9 @@ class BookingWriteSerializer(serializers.ModelSerializer):
         
         # Ensure that the selected seat is not already booked
         if Booking.objects.filter(seat=seat, status='CONFIRMED').exists():
-            raise serializers.ValidationError("Selected seat is already booked.")
+            raise serializers.ValidationError({
+                "seat": "Seat is already booked."
+            })
         
         # Ensure that the idempotency key is unique for the user
         request = self.context.get('request')
@@ -35,22 +36,24 @@ class BookingWriteSerializer(serializers.ModelSerializer):
         
         return data
     
-    def validate_amount(self, value):
-        """ Ensure that the amount is a positive number. """
-        if value <= 0:
-            raise serializers.ValidationError("Amount must be a positive number.")
-        return value
+    # def validate_amount(self, value):
+    #     """ Ensure that the amount is a positive number. """
+    #     if value <= 0:
+    #         raise serializers.ValidationError("Amount must be a positive number.")
+    #     return value
     
     def create(self, validated_data):
         """ Override create method to associate the booking with the authenticated user. """
         request = self.context.get('request')
         user = request.user if request else None
-
-        validated_data['user'] = user
-        validated_data['status'] = 'PENDING'  # Default status for new bookings
+        event = validated_data.get('event')
 
         if user is None or not user.is_authenticated:
             raise serializers.ValidationError("User must be authenticated to create a booking.")
+        
+        validated_data['user'] = user
+        validated_data['status'] = 'PENDING'  # Default status for new bookings
+        validated_data['amount'] = event.price # Get amount from the event's price
         
         return Booking.objects.create(**validated_data)
     

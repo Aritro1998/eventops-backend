@@ -1,3 +1,5 @@
+from time import timezone
+
 from rest_framework import serializers
 from .models import Event, Seat
 
@@ -21,7 +23,8 @@ class EventReadSerializer(serializers.ModelSerializer):
             'start_time',
             'end_time',
             'total_seats',
-            'available_seats'
+            'available_seats',
+            'price',
         ]
 
 
@@ -33,6 +36,7 @@ class EventSummerySerializer(serializers.ModelSerializer):
             'name',
             'start_time',
             'end_time',
+            'price',
         ]
 
 
@@ -55,6 +59,7 @@ class EventWriteSerializer(serializers.ModelSerializer):
             'start_time',
             'end_time',
             'total_seats',
+            'price',
         ]
 
     def validate(self, data):
@@ -62,12 +67,23 @@ class EventWriteSerializer(serializers.ModelSerializer):
         end = data.get('end_time')
         if start and end and end <= start:
             raise serializers.ValidationError("End time must be after start time.")
+        if start and start < timezone.now():
+            raise serializers.ValidationError("Event cannot start in the past.")
         return data
     
     def validate_total_seats(self, value):
         if value <= 0:
             raise serializers.ValidationError("Total seats must be a positive integer.")
         return value
+    
+    def validate_price(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Price must be a non-negative value.")
+        return value
+    
+    def create(self, validated_data):
+        validated_data['created_by'] = self.context['request'].user
+        return super().create(validated_data)
     
     
 

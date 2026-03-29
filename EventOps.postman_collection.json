@@ -148,7 +148,7 @@
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n    \"event\": 6,\n    \"seat\": 260,\n    \"amount\": 500,\n    \"idempotency_key\": \"{{idempotency_key}}\"\n}",
+              "raw": "{\n    \"event\": 6,\n    \"seat\": 262,\n    \"idempotency_key\": \"{{idempotency_key}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
