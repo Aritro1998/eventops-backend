@@ -11,6 +11,7 @@ class Booking(models.Model):
         ('CONFIRMED', 'Confirmed'),
         ('PENDING', 'Pending'),
         ('CANCELLED', 'Cancelled'),
+        ('FAILED', 'Failed'),
     ]
 
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="bookings")
