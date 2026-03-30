@@ -29,4 +29,4 @@ class Payment(models.Model):
         ]
 
     def __str__(self):
-        return f"Payment for Booking {self.booking.id} - Amount: {self.amount}"
+        return f"Payment:{self.id} - Booking: {self.booking.id} - Status: {self.status}"

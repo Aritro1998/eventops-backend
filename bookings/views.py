@@ -59,32 +59,34 @@ class BookingListView(APIView):
         )
         serializer.is_valid(raise_exception=True)
 
-        #  3. Delegate to service layer
+        # 3. Delegate to service layer
         booking, seat_unavailable, is_existing = BookingService.create_booking(
             user=user,
             validated_data=serializer.validated_data,
             key=key
         )
 
-        #  Handle seat conflict
+        # Handle seat conflict
         if seat_unavailable:
             return Response(
                 {"detail": "Seat already booked"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        #  Idempotent retry
+        # Idempotent retry
         if is_existing:
             return respond_existing(booking)
 
-        #  4. Trigger payment workflow (outside transaction)
+        # 4. Trigger payment workflow (outside transaction)
         if booking.status == "PENDING":
             PaymentService.process_payment(booking.id)
 
-        #  Fetch optimized object (avoids N+1)
-        booking = Booking.objects.select_related("event", "seat", "payment").get(id=booking.id)
+        # Fetch optimized object (avoids N+1)
+        booking = Booking.objects.select_related(
+            "event", "seat", "payment"
+        ).get(id=booking.id)
 
-        #  5. Return response
+        # 5. Return response
         return Response(
             BookingReadSerializer(booking).data,
             status=status.HTTP_201_CREATED
@@ -175,3 +177,46 @@ class BookingCancelView(APIView):
 
         serializer = BookingReadSerializer(booking)
         return Response(serializer.data)
+    
+
+class BookingRetryPaymentView(APIView):
+    """
+    Retry payment for a booking.
+
+    Business rules:
+    - Only PENDING, FAILED bookings can retry payment
+    - Max 3 retries allowed
+    - Booking expires after 15 minutes or 3 failed attempts
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, booking_id):
+
+        booking = get_object_or_404(
+            Booking.objects.select_related("event", "seat", "payment"),
+            id=booking_id,
+            user=request.user
+        )
+
+        # Validate booking status
+        if booking.status not in ["FAILED", "PENDING"]:
+            return Response(
+                {"detail": "Payment cannot be retried for this booking status."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            payment = PaymentService.process_payment(booking.id)
+        except ValueError as e:
+            return Response(
+                {"detail": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Refresh booking to get updated status
+        booking.refresh_from_db()
+
+        serializer = BookingReadSerializer(booking)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    

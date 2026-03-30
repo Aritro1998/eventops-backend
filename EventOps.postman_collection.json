@@ -148,7 +148,7 @@
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n    \"event\": 6,\n    \"seat\": 262,\n    \"idempotency_key\": \"{{idempotency_key}}\"\n}",
+              "raw": "{\n    \"event\": 6,\n    \"seat\": 267,\n    \"idempotency_key\": \"{{idempotency_key}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -274,6 +274,46 @@
                 "bookings",
                 "1",
                 "cancel",
+                ""
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Retry Payment",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/bookings/6/retry-payment/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "6",
+                "retry-payment",
                 ""
               ]
             }

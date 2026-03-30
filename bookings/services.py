@@ -1,5 +1,6 @@
 from django.db import transaction, IntegrityError
-from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from datetime import timedelta
 
 from .models import Booking
 from events.models import Seat
@@ -15,6 +16,8 @@ class BookingService:
     - Prepares system for async workflows
     """
 
+    EXPIRY_MINUTES = 15
+
     @staticmethod
     def get_existing_booking(user, key):
         """
@@ -22,10 +25,31 @@ class BookingService:
 
         Uses select_related to avoid N+1 queries when serializing.
         """
-        return Booking.objects.select_related("event", "seat").filter(
+        return Booking.objects.select_related(
+            "event", "seat", "payment"
+        ).filter(
             user=user,
             idempotency_key=key
         ).first()
+
+    @staticmethod
+    def is_seat_available(seat):
+        """
+        Check if seat is available.
+
+        A seat is considered unavailable if there exists a booking:
+        - with CONFIRMED status OR
+        - with PENDING / FAILED status AND not expired
+        """
+
+        now = timezone.now()
+
+        return not Booking.objects.filter(
+            seat=seat
+        ).filter(
+            status__in=["CONFIRMED", "PENDING", "FAILED"],
+            expires_at__gt=now
+        ).exists()
 
     @staticmethod
     def create_booking(user, validated_data, key):
@@ -34,6 +58,7 @@ class BookingService:
         - Concurrency safety (row locking)
         - Idempotency
         - Transaction management
+        - Expiry handling
 
         IMPORTANT:
         - Pricing logic lives here (not in serializer)
@@ -53,8 +78,7 @@ class BookingService:
             with transaction.atomic():
 
                 # Lock seat row to prevent concurrent booking attempts
-                seat = get_object_or_404(
-                    Seat.objects.select_for_update(),
+                seat = Seat.objects.select_for_update().get(
                     id=validated_data["seat"].id
                 )
 
@@ -66,11 +90,8 @@ class BookingService:
                 # Create booking only if it doesn't already exist
                 if booking is None:
 
-                    # Prevent double booking of same seat
-                    if Booking.objects.filter(
-                        seat=seat,
-                        status="CONFIRMED"
-                    ).exists():
+                    # Check seat availability (considers expiry)
+                    if not BookingService.is_seat_available(seat):
                         seat_unavailable = True
                     else:
                         event = validated_data["event"]
@@ -78,13 +99,20 @@ class BookingService:
                         # IMPORTANT: derive amount from backend (never trust client)
                         amount = event.price
 
+                        # Set expiry time dynamically
+                        expires_at = timezone.now() + timedelta(
+                            minutes=BookingService.EXPIRY_MINUTES
+                        )
+
                         booking = Booking.objects.create(
                             user=user,
                             event=event,
                             seat=seat,
                             amount=amount,
                             idempotency_key=key,
-                            status="PENDING"
+                            status="PENDING",
+                            expires_at=expires_at,
+                            retry_count=0
                         )
 
         except IntegrityError:
