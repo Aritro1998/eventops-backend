@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     "events",
     "bookings",
     "workflows",
+    "payments",
 ]
 
 MIDDLEWARE = [
