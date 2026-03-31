@@ -97,16 +97,38 @@ DATABASES = {
 
 # Rest Framework & JWT Settings
 REST_FRAMEWORK = {
+    # Use JWT Authentication globally
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+    # Default throttle classes for all views (can be overridden at the view level)
+    "DEFAULT_THROTTLE_CLASSES": [
+        "core.throttles.DefaultThrottle",
+    ],
+    # Configure throttling rates for different scopes
+    "DEFAULT_THROTTLE_RATES": {
+        "booking": "5/min",
+        "auth": "10/min",
+        "default": "100/min"
+    }
 }
 
+# Simple JWT settings
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
+# Caching configuration using Redis
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": "redis://redis:6379/1",
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        }
+    }
+}
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
