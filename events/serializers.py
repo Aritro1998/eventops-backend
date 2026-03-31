@@ -1,4 +1,4 @@
-from time import timezone
+from django.utils import timezone
 
 from rest_framework import serializers
 from .models import Event, Seat
