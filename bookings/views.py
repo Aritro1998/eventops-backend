@@ -6,9 +6,10 @@ from django.shortcuts import get_object_or_404
 
 from .models import Booking
 from .services import BookingService
-from .serializers import BookingWriteSerializer, BookingReadSerializer
+from core.throttles import BookingThrottle, DefaultThrottle
 from core.pagination import CustomPagination
 from payments.services import PaymentService
+from .serializers import BookingWriteSerializer, BookingReadSerializer
 
 
 class BookingListView(APIView):
@@ -19,6 +20,16 @@ class BookingListView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+
+    def get_throttles(self):
+        """
+        Apply throttling only to POST requests to prevent abuse of booking creation.
+        GET requests (listing) are not throttled to allow users to view their bookings without limits.
+        get_throttles is called for every request, so we can conditionally apply throttling based on the HTTP method.
+        """
+        if self.request.method == "POST":
+            return [BookingThrottle()]
+        return [DefaultThrottle()]
 
     def post(self, request):
         """
@@ -158,6 +169,7 @@ class BookingCancelView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [BookingThrottle]
 
     def post(self, request, booking_id):
 
@@ -190,6 +202,7 @@ class BookingRetryPaymentView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [BookingThrottle]
 
     def post(self, request, booking_id):
 

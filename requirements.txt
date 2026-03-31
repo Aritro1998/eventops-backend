@@ -5,6 +5,7 @@ psycopg2-binary==2.9.11
 python-dotenv==1.2.2
 sqlparse==0.5.5
 redis==5.0.1
+django-redis==5.4.0
 celery==5.3.6
 django-filter==24.2
 djangorestframework-simplejwt==5.3.1
