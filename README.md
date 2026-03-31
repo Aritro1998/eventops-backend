@@ -39,20 +39,29 @@ This project focuses on solving real-world backend challenges like:
 * `available_seats` is annotated in read responses
 * Event creation auto-generates seats (`events.Seat`) from `total_seats`
 * Event total seats update adjusts seats safely with transaction lock
+* Events include `price` field for ticket pricing
 * model constraints:
   * `total_seats > 0`
   * `end_time > start_time`
+  * `price >= 0`
   * unique `seat_number` per event
 
 ### ✅ Booking System
 
 * `POST /api/bookings/` with:
-  * `event`, `seat`, `amount`, `idempotency_key`
+  * `event`, `seat`, `idempotency_key`
+* Amount is automatically set from the event's price (not user input)
 * Idempotency + repeatable client safety:
   * first checks `user + idempotency_key`
   * re-checks inside `transaction.atomic()`
 * Row-level locking via `Seat.objects.select_for_update()`
 * CONFIRMED seat uniqueness enforced at DB level
+* Payment integration with simulated gateway:
+  * Automatic payment processing on booking creation
+  * Retry logic with `POST /api/bookings/{id}/retry-payment/`
+  * Booking expiry (15 minutes) and retry limits (3 attempts)
+  * Statuses: PENDING, CONFIRMED, FAILED, EXPIRED, CANCELLED
+* Rate limiting (throttling) on booking endpoints to prevent abuse
 * `GET /api/bookings/` (user scope + optional `?status=` filter + pagination)
 * `GET /api/bookings/{id}/`
 * `POST /api/bookings/{id}/cancel/` sets `CANCELLED`
@@ -66,6 +75,10 @@ This project focuses on solving real-world backend challenges like:
 * `entrypoint.sh` waits for PostgreSQL, runs migrations, starts Django dev server
 * Environment-driven settings in `core/settings.py`
 * Custom pagination in `core/pagination.py`
+* Rate limiting/throttling configured:
+  * Booking endpoints: 5 requests/min per user
+  * Auth endpoints: 10 requests/min per user
+  * Default: 100 requests/min per user
 
 ### ✅ Postman Support
 
@@ -78,7 +91,6 @@ This project focuses on solving real-world backend challenges like:
 
 * Workflow job system (async processing with retries)
 * Role-Based Access Control (RBAC) beyond events
-* API rate limiting, filtering, pagination
 * Analytics endpoints (revenue, bookings, etc.)
 
 ---
