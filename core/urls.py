@@ -32,5 +32,4 @@ urlpatterns = [
     path('api/auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('api/events/', include(events_urls)),
     path('api/bookings/', include(bookings_urls)),
-    path('api/bookings/', include(bookings_urls)),
 ]
