@@ -15,6 +15,7 @@ from pathlib import Path
 from django.db import connections
 from pathlib import Path
 from datetime import timedelta
+from celery.schedules import crontab
 
 print("SETTINGS FILE LOADED")
 
@@ -130,6 +131,14 @@ CACHES = {
     }
 }
 
+# Celery beat schedule for periodic tasks
+CELERY_BEAT_SCHEDULE = {
+    "requeue-pending-jobs": {
+        "task": "workflows.tasks.requeue_pending_jobs_task",
+        "schedule": crontab(minute="*/5"),  # every 5 minutes
+    },
+}
+
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
 
@@ -170,3 +179,16 @@ STATIC_URL = 'static/'
 AUTH_USER_MODEL = 'users.User'
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Celery Configuration
+CELERY_BROKER_URL = "redis://redis:6379/0"
+CELERY_RESULT_BACKEND = "redis://redis:6379/0"
+
+# Email Configuration
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = os.getenv("EMAIL_HOST")
+EMAIL_PORT = os.getenv("EMAIL_PORT")
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS") == "True"
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER

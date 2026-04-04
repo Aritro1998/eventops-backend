@@ -21,6 +21,7 @@ class WorkflowJob(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     last_error = models.TextField(blank=True)
+    is_email_sent = models.BooleanField(default=False)
 
     def __str__(self):
         return f"Workflow Job {self.id} - {self.job_type} - {self.status}"
