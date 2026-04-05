@@ -15,7 +15,8 @@ This project focuses on solving real-world backend challenges like:
 * **Backend:** Django 6.0, Django REST Framework
 * **Auth:** JWT (djangorestframework-simplejwt)
 * **Database:** PostgreSQL
-* **Cache / Queue placeholder:** Redis
+* **Cache / Queue:** Redis
+* **Async tasks:** Celery
 * **Containerization:** Docker & Docker Compose
 
 ---
@@ -56,11 +57,18 @@ This project focuses on solving real-world backend challenges like:
   * re-checks inside `transaction.atomic()`
 * Row-level locking via `Seat.objects.select_for_update()`
 * CONFIRMED seat uniqueness enforced at DB level
+* Booking expiration workflow:
+  * bookings expire after 15 minutes if not confirmed
+  * expiry is scheduled with a Celery workflow job
+  * expired bookings free the seat for reuse
+* Booking confirmation workflow:
+  * confirmation emails are sent via Celery jobs
+  * email notification payloads are generated on successful confirmation
 * Payment integration with simulated gateway:
   * Automatic payment processing on booking creation
   * Retry logic with `POST /api/bookings/{id}/retry-payment/`
-  * Booking expiry (15 minutes) and retry limits (3 attempts)
-  * Statuses: PENDING, CONFIRMED, FAILED, EXPIRED, CANCELLED
+  * Retry limits: 3 attempts
+  * Booking statuses: `PENDING`, `CONFIRMED`, `FAILED`, `EXPIRED`, `CANCELLED`
 * Rate limiting (throttling) on booking endpoints to prevent abuse
 * `GET /api/bookings/` (user scope + optional `?status=` filter + pagination)
 * `GET /api/bookings/{id}/`
@@ -71,14 +79,21 @@ This project focuses on solving real-world backend challenges like:
 
 ### ✅ Infrastructure
 
-* `Dockerfile` and `docker-compose.yml` with `db`, `redis`, `web`
+* `Dockerfile` and `docker-compose.yml` with `db`, `redis`, `web`, `celery`, and `celery-beat`
 * `entrypoint.sh` waits for PostgreSQL, runs migrations, starts Django dev server
 * Environment-driven settings in `core/settings.py`
+* Redis-backed Celery broker and result backend
+* Scheduled workflow requeue via Celery beat every 5 minutes
+* Email backend placeholders and workflow notification pipeline (optional SMTP config)
 * Custom pagination in `core/pagination.py`
 * Rate limiting/throttling configured:
   * Booking endpoints: 5 requests/min per user
   * Auth endpoints: 10 requests/min per user
   * Default: 100 requests/min per user
+
+### ✅ Tests
+
+* Unit test suites added for bookings, payments, events, and users
 
 ### ✅ Postman Support
 
@@ -89,9 +104,9 @@ This project focuses on solving real-world backend challenges like:
 
 ## 🚧 In Progress
 
-* Workflow job system (async processing with retries)
 * Role-Based Access Control (RBAC) beyond events
 * Analytics endpoints (revenue, bookings, etc.)
+* API documentation / OpenAPI schema generation
 
 ---
 
@@ -114,6 +129,16 @@ DB_USER=postgres
 DB_PASSWORD=postgres
 DB_HOST=db
 DB_PORT=5432
+```
+
+Optional email settings (SMTP delivery rather than logging):
+
+```env
+EMAIL_HOST=smtp.example.com
+EMAIL_PORT=587
+EMAIL_HOST_USER=user@example.com
+EMAIL_HOST_PASSWORD=secret
+EMAIL_USE_TLS=True
 ```
 
 3. Build and run:
@@ -146,11 +171,11 @@ docker compose exec web python manage.py createsuperuser
 
 ## 🔜 Future Enhancements
 
-* Payment integration
 * Dynamic pricing engine
 * AI-based seat recommendations
 * Fraud detection workflows
 * Horizontal scaling support
+* API docs and endpoint discovery
 
 ---
 
