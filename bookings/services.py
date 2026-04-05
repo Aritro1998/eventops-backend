@@ -4,6 +4,8 @@ from datetime import timedelta
 
 from .models import Booking
 from events.models import Seat
+from workflows.models import WorkflowJob
+from workflows.services import schedule_job
 
 
 class BookingService:
@@ -114,6 +116,17 @@ class BookingService:
                             expires_at=expires_at,
                             retry_count=0
                         )
+
+                        job = WorkflowJob.objects.create(
+                            job_type="BOOKING_EXPIRY",
+                            booking=booking,
+                            status="PENDING",
+                            payload={
+                                "booking_id": booking.id,
+                            },
+                        )
+
+                        schedule_job(job, delay_seconds=BookingService.EXPIRY_MINUTES * 60)
 
         except IntegrityError:
             # Final safety net for idempotency (DB constraint)

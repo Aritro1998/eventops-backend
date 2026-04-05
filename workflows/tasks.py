@@ -3,6 +3,7 @@ from django.db import transaction
 from django.core.mail import send_mail
 from workflows.models import WorkflowJob
 from django.core.mail import EmailMultiAlternatives
+from django.utils import timezone
 
 from django.conf import settings
 from workflows.services import requeue_pending_jobs
@@ -35,6 +36,8 @@ def process_workflow_job(self, job_id):
         print(f"=> Processing job {job.id} of type {job.job_type}")
         if job.job_type.strip().upper() == "BOOKING_CONFIRMATION":
             handle_booking_confirmation(job)
+        elif job.job_type.strip().upper() == "BOOKING_EXPIRY":
+            handle_booking_expiry(job)
         else:
             print(f"=> Unknown job type: {job.job_type}")
 
@@ -61,6 +64,11 @@ def requeue_pending_jobs_task():
 
 
 def handle_booking_confirmation(job):
+    """
+    Handle email sending for booking confirmation.
+    Ensures idempotency by checking if the email has already been sent for this job.
+    If email sending fails, the exception is raised to trigger a retry.
+    """
 
     print("=> HANDLE BOOKING CALLED")
 
@@ -145,3 +153,28 @@ def handle_booking_confirmation(job):
     except Exception as e:
         print(f"Email sending failed: {str(e)}")
         raise
+
+
+def handle_booking_expiry(job):
+    """
+    Handle booking expiry by marking the booking as expired and freeing up the seat.
+    This function should be called by a workflow job scheduled at the booking's expiry time.
+    """
+
+    booking = job.booking
+
+    now = timezone.now()
+
+    # WAIT until actual expiry time
+    if now < booking.expires_at:
+        return
+
+    # critical safety check
+    if booking.status not in ["PENDING", "FAILED"]:
+        return
+
+    booking.status = "EXPIRED"
+    booking.save()
+
+    booking.seat.is_booked = False
+    booking.seat.save()
