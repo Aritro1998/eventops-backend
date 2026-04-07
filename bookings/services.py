@@ -151,6 +151,6 @@ class BookingService:
             raise ValueError("Only CONFIRMED bookings can be CANCELLED.")
 
         booking.status = "CANCELLED"
-        booking.save()
+        booking.save(update_fields=["status", "updated_at"])
 
         return booking

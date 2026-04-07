@@ -1,6 +1,6 @@
 from celery import shared_task
 from django.db import transaction
-from django.core.mail import send_mail
+from bookings.models import Booking
 from workflows.models import WorkflowJob
 from django.core.mail import EmailMultiAlternatives
 from django.utils import timezone
@@ -9,17 +9,18 @@ from django.conf import settings
 from workflows.services import requeue_pending_jobs
 
 
-@shared_task(bind=True, max_retries=3, acks_late=True)
+@shared_task(bind=True, acks_late=True)
 def process_workflow_job(self, job_id):
     """
     Celery task to process a workflow job.
-    This task retrieves the job by ID, checks its status, and processes it accordingly.
-    If the job is not in a "PENDING" state, it will be ignored.
-    If an error occurs during processing, the task will retry up to 3 times with a delay of 5 seconds between retries. 
-    The job's status and retry count are updated in the database
+    The task claims the job first, performs the side effect outside the lock,
+    and then re-locks the row before writing the final state.
+    This pattern keeps the critical section small while still protecting the
+    workflow status transitions from concurrent workers.
     """
 
-    
+    MAX_RETRIES = 3
+
     with transaction.atomic():
 
         job = WorkflowJob.objects.select_for_update().get(id=job_id)
@@ -28,31 +29,43 @@ def process_workflow_job(self, job_id):
             return
 
         job.status = "IN_PROGRESS"
-        job.save()
+        job.save(update_fields=["status", "updated_at"])
 
     try:
 
         # Process the job based on its type
-        print(f"=> Processing job {job.id} of type {job.job_type}")
         if job.job_type.strip().upper() == "BOOKING_CONFIRMATION":
             handle_booking_confirmation(job)
         elif job.job_type.strip().upper() == "BOOKING_EXPIRY":
             handle_booking_expiry(job)
         else:
-            print(f"=> Unknown job type: {job.job_type}")
+            raise ValueError(f"Unknown job type: {job.job_type}")
 
         # mark success only after processing
-        job.status = "COMPLETED"
-        job.save(update_fields=["status"])
+        with transaction.atomic():
+            job = WorkflowJob.objects.select_for_update().get(id=job_id)
+            job.status = "COMPLETED"
+            job.save(update_fields=["status", "updated_at"])
 
-    except Exception as exc:
+    except Exception as e:
+        with transaction.atomic():
+            job = WorkflowJob.objects.select_for_update().get(id=job_id)
+            job.retry_count += 1
+            job.last_error = str(e)
 
-        job.retry_count += 1
-        job.status = "FAILED"
-        job.last_error = str(exc)
-        job.save()
+            if job.retry_count >= MAX_RETRIES:
+                job.status = "FAILED"
+                job.save(update_fields=["status", "retry_count", "last_error", "updated_at"])
+            else:
+                job.status = "PENDING"
+                job.save(update_fields=["status", "retry_count", "last_error", "updated_at"])
 
-        raise self.retry(exc=exc, countdown=5)
+        if job.status == "PENDING":
+            # Requeue the job with a delay for retry
+            process_workflow_job.apply_async(
+                args=[job.id],
+                countdown=5
+            )
 
 
 @shared_task
@@ -69,8 +82,6 @@ def handle_booking_confirmation(job):
     Ensures idempotency by checking if the email has already been sent for this job.
     If email sending fails, the exception is raised to trigger a retry.
     """
-
-    print("=> HANDLE BOOKING CALLED")
 
     if job.is_email_sent:
         return
@@ -128,53 +139,42 @@ def handle_booking_confirmation(job):
     </html>
     """
 
-    try:
-        # Check if email is configured
-        if not settings.EMAIL_HOST_USER:
-            print("Email not configured. Logging instead.")
-            print(text_content)
-            return
+    # Skip delivery cleanly when SMTP is not configured.
+    if not settings.EMAIL_HOST_USER:
+        return
 
-        msg = EmailMultiAlternatives(
-            subject=subject,
-            body=text_content,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            to=[email],
-        )
+    msg = EmailMultiAlternatives(
+        subject=subject,
+        body=text_content,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[email],
+    )
 
-        msg.attach_alternative(html_content, "text/html")
-        msg.send()
+    msg.attach_alternative(html_content, "text/html")
+    msg.send()
 
-        job.is_email_sent = True
-        job.save(update_fields=["is_email_sent"])
-
-        print(f"Email sent to {email}")
-
-    except Exception as e:
-        print(f"Email sending failed: {str(e)}")
-        raise
+    job.is_email_sent = True
+    job.save(update_fields=["is_email_sent"])
 
 
 def handle_booking_expiry(job):
     """
-    Handle booking expiry by marking the booking as expired and freeing up the seat.
-    This function should be called by a workflow job scheduled at the booking's expiry time.
+    Expire bookings that have timed out before payment/confirmation finished.
+    We re-fetch the booking under a row lock because payment retry/confirmation
+    may be updating the same booking at roughly the same time.
     """
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().get(id=job.booking_id)
+        now = timezone.now()
 
-    booking = job.booking
+        # The task may wake up slightly early; return quietly until the booking is truly due.
+        if now < booking.expires_at:
+            return
 
-    now = timezone.now()
+        # If another workflow already moved the booking out of an expirable state,
+        # we leave it alone.
+        if booking.status not in ["PENDING", "FAILED"]:
+            return
 
-    # WAIT until actual expiry time
-    if now < booking.expires_at:
-        return
-
-    # critical safety check
-    if booking.status not in ["PENDING", "FAILED"]:
-        return
-
-    booking.status = "EXPIRED"
-    booking.save()
-
-    booking.seat.is_booked = False
-    booking.seat.save()
+        booking.status = "EXPIRED"
+        booking.save(update_fields=["status", "updated_at"])

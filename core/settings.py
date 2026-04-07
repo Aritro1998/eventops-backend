@@ -12,12 +12,8 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 import os
 from pathlib import Path
-from django.db import connections
-from pathlib import Path
 from datetime import timedelta
 from celery.schedules import crontab
-
-print("SETTINGS FILE LOADED")
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -25,6 +21,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
+# Demo-project defaults keep local setup easy.
+# Before any real deployment, move SECRET_KEY/DEBUG/ALLOWED_HOSTS to strict env-only values.
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-l(zh$)@+c&r8+#d-_dkcnrx0l@5(&8^-6zm_l*8j11y&*otlnw")
 
@@ -44,6 +42,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     "rest_framework",
+    "django_filters",
     "rest_framework_simplejwt",
     "users",
     "events",
@@ -111,7 +110,7 @@ REST_FRAMEWORK = {
         "booking": "5/min",
         "auth": "10/min",
         "default": "100/min"
-    }
+    },
 }
 
 # Simple JWT settings

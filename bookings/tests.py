@@ -9,17 +9,23 @@ from django.db import IntegrityError, connection
 
 from rest_framework.test import APIClient
 
-from bookings.models import Event, Seat, Booking
+from bookings.models import Booking
+from events.models import Event, Seat
 
 
 User = get_user_model()
 
 
-class BookingTestCase(TestCase):
+class TestBooking(TestCase):
 
     def setUp(self):
 
-        self.user = User.objects.create(username="testuser")
+        self.user = User.objects.create_user(
+            username="testuser",
+            email="testuser@example.com",
+            password="StrongPass@123"
+        )
+
 
         self.event = Event.objects.create(
             name="Test Event",
@@ -48,7 +54,8 @@ class BookingTestCase(TestCase):
             event=self.event,
             seat=self.seat,
             status="CONFIRMED",
-            amount=100
+            amount=100,
+            idempotency_key=str(uuid.uuid4())
         )
 
         self.assertEqual(booking.status, "CONFIRMED")
@@ -61,7 +68,8 @@ class BookingTestCase(TestCase):
             event=self.event,
             seat=self.seat,
             status="CONFIRMED",
-            amount=100
+            amount=100,
+            idempotency_key=str(uuid.uuid4())
         )
 
         with self.assertRaises(IntegrityError):
@@ -70,7 +78,8 @@ class BookingTestCase(TestCase):
                 event=self.event,
                 seat=self.seat,
                 status="CONFIRMED",
-                amount=100
+                amount=100,
+                idempotency_key=str(uuid.uuid4())
             )
 
     # -------------------------
