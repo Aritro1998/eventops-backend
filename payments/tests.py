@@ -15,10 +15,14 @@ from payments.services import PaymentService
 User = get_user_model()
 
 
-class PaymentTestCase(TestCase):
+class TestPayment(TestCase):
 
     def setUp(self):
-        self.user = User.objects.create_user(username="testuser")
+        self.user = User.objects.create_user(
+            username="testuser",
+            email="testuser@example.com",
+            password="StrongPass@123"
+        )
 
         self.event = Event.objects.create(
             name="Test Event",
@@ -137,5 +141,5 @@ class PaymentTestCase(TestCase):
 
         self.booking.refresh_from_db()
 
-        # transaction rolled back → status unchanged
-        self.assertEqual(self.booking.status, "PENDING")
+        # booking should persist as expired
+        self.assertEqual(self.booking.status, "EXPIRED")

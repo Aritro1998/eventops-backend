@@ -43,3 +43,16 @@ class IsAdminOrOrganizer(BasePermission):
             return True
 
         return False
+    
+
+class IsRoleAdmin(BasePermission):
+    """
+    API-facing admin check based on the custom User.role field.
+    This keeps business permissions aligned with the rest of the demo project
+    instead of relying on Django admin-site flags such as is_staff.
+    """
+    def has_permission(self, request, view):
+        return (
+            request.user.is_authenticated and
+            getattr(request.user, "role", None) == "ADMIN"
+        )

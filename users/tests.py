@@ -7,7 +7,7 @@ from rest_framework.test import APIClient
 User = get_user_model()
 
 
-class UserTestCase(TestCase):
+class TestUser(TestCase):
 
     def setUp(self):
 
@@ -82,4 +82,4 @@ class UserTestCase(TestCase):
 
         response = self.client.get("/api/bookings/")
 
-        self.assertNotEqual(response.status_code, 401)
+        self.assertEqual(response.status_code, 200)

@@ -1,5 +1,6 @@
-from django.shortcuts import render
+from django.db.models import Max
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import serializers
 from django.db.models import Count, Q, F
 from rest_framework.permissions import AllowAny
@@ -7,8 +8,8 @@ from rest_framework.viewsets import ModelViewSet
 from rest_framework.filters import OrderingFilter
 
 from .models import Event, Seat
-from .serializers import EventReadSerializer, EventWriteSerializer
 from core.permissions import IsAdminOrOrganizer
+from .serializers import EventReadSerializer, EventWriteSerializer
 
 # Create your views here.
 class EventViewSet(ModelViewSet):
@@ -72,7 +73,7 @@ class EventViewSet(ModelViewSet):
         ])
 
     def perform_update(self, serializer):
-        # Use a transaction to ensure atomicity of the update and seat adjustments
+        # We lock the event row so seat-count changes and seat table updates happen together.
         with transaction.atomic():
             event = Event.objects.select_for_update().get(id=self.get_object().id)
 
@@ -83,9 +84,12 @@ class EventViewSet(ModelViewSet):
             new_total_seats = serializer.validated_data.get('total_seats', old_total_seats)
 
             # Get the count of currently booked seats for the event
-            max_booked_seat = event.bookings.seats.aggregate(
-                max_seat_number=Max('seat_number', filter=Q(status='CONFIRMED'))
+            max_booked_seat = event.bookings.filter(
+                status='CONFIRMED'
+            ).aggregate(
+                max_seat_number=Max('seat__seat_number')
             )['max_seat_number'] or 0
+
 
             # Validate that the new total_seats is not less than the number of already booked seats
             if new_total_seats < max_booked_seat:
@@ -109,12 +113,26 @@ class EventViewSet(ModelViewSet):
                     for i in range(old_total_seats + 1, updated_event.total_seats + 1)
                 ])
             elif updated_event.total_seats < old_total_seats:
-                # If total_seats has decreased, need to remove the extra seats
-                # We will only remove unbooked seats to avoid affecting existing bookings
-                seats_to_remove = Seat.objects.filter(
+                seats_above_limit = Seat.objects.filter(
                     event=updated_event,
                     seat_number__gt=updated_event.total_seats
-                ).exclude(
+                )
+
+                active_bookings_exist = event.bookings.filter(
+                    seat__in=seats_above_limit
+                ).filter(
+                    Q(status='CONFIRMED') |
+                    Q(status__in=['PENDING', 'FAILED'], expires_at__gt=timezone.now())
+                ).exists()
+
+                if active_bookings_exist:
+                    raise serializers.ValidationError(
+                        "Cannot reduce total seats because some higher-numbered seats have active bookings."
+                    )
+
+                # Shrinking is only safe after we prove those higher-numbered seats are not
+                # still referenced by active bookings.
+                seats_to_remove = seats_above_limit.exclude(
                     id__in=event.bookings.filter(status='CONFIRMED').values_list('seat_id', flat=True)
                 )
                 # Remove the unbooked seats that are above the new total_seats
@@ -125,4 +143,3 @@ class EventViewSet(ModelViewSet):
             # Only authenticated users can create, update, or delete events
             return [IsAdminOrOrganizer()]
         return [AllowAny()]
-

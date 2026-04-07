@@ -23,13 +23,16 @@ class BookingWriteSerializer(serializers.ModelSerializer):
         if seat and event and seat.event_id != event.id:
             raise serializers.ValidationError("Selected seat does not belong to the specified event.")
 
-        # Ensure that the selected seat is not already booked
+        # Fast validation for the most obvious conflict.
+        # The service layer still re-checks availability under a DB lock so
+        # concurrent requests cannot slip past this serializer-level check.
         if Booking.objects.filter(seat=seat, status='CONFIRMED').exists():
             raise serializers.ValidationError({
                 "seat": "Seat is already booked."
             })
 
-        # Ensure that the idempotency key is unique for the user
+        # This gives a friendly validation error early.
+        # The database constraint remains the final safety net for races.
         request = self.context.get('request')
         user = request.user if request else None
         if idempotency_key and user and Booking.objects.filter(user=user, idempotency_key=idempotency_key).exists():

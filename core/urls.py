@@ -24,6 +24,7 @@ from rest_framework_simplejwt.views import (
 from events import urls as events_urls
 from bookings import urls as bookings_urls
 from users import urls as auth_urls
+from workflows import urls as workflows_urls
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -32,4 +33,5 @@ urlpatterns = [
     path('api/auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('api/events/', include(events_urls)),
     path('api/bookings/', include(bookings_urls)),
+    path('api/workflows/', include(workflows_urls)),
 ]

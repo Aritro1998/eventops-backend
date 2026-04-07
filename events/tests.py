@@ -13,7 +13,7 @@ from events.models import Event
 User = get_user_model()
 
 
-class EventTestCase(TestCase):
+class TestEvent(TestCase):
 
     def setUp(self):
 
@@ -23,7 +23,7 @@ class EventTestCase(TestCase):
         self.organizer = User.objects.create_user(
             username="organizer",
             email="org@test.com",
-            password="password",
+            password="StrongPass@123",
             role="ORGANIZER"
         )
 
@@ -31,7 +31,7 @@ class EventTestCase(TestCase):
         self.user = User.objects.create_user(
             username="user",
             email="user@test.com",
-            password="password",
+            password="StrongPass@123",
             role="USER"
         )
 
