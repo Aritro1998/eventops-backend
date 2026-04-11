@@ -22,6 +22,9 @@ class WorkflowJob(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     last_error = models.TextField(blank=True)
     is_email_sent = models.BooleanField(default=False)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    result = models.JSONField(null=True, blank=True)
 
     def __str__(self):
         return f"Workflow Job {self.id} - {self.job_type} - {self.status}"

@@ -79,9 +79,10 @@ class TestWorkflow(TestCase):
         response = self.client.get("/api/workflows/failed-jobs/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]["id"], failed_job.id)
-        self.assertEqual(response.data[0]["status"], "FAILED")
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertEqual(response.data["results"][0]["id"], failed_job.id)
+        self.assertEqual(response.data["results"][0]["status"], "FAILED")
 
     def test_failed_jobs_view_requires_admin_role(self):
         WorkflowJob.objects.create(
@@ -95,6 +96,77 @@ class TestWorkflow(TestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_workflow_jobs_list_view_is_paginated(self):
+        WorkflowJob.objects.create(
+            job_type="BOOKING_CONFIRMATION",
+            booking=self.booking,
+            status="FAILED",
+        )
+        WorkflowJob.objects.create(
+            job_type="BOOKING_EXPIRY",
+            booking=self.booking,
+            status="COMPLETED",
+        )
+
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.get("/api/workflows/jobs/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("count", response.data)
+        self.assertIn("results", response.data)
+        self.assertGreaterEqual(response.data["count"], 2)
+
+    def test_workflow_jobs_detail_view_returns_single_job(self):
+        job = WorkflowJob.objects.create(
+            job_type="BOOKING_CONFIRMATION",
+            booking=self.booking,
+            status="FAILED",
+        )
+
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.get(f"/api/workflows/jobs/{job.id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["id"], job.id)
+        self.assertEqual(response.data["job_type"], "BOOKING_CONFIRMATION")
+
+    def test_stuck_jobs_view_returns_only_old_in_progress_jobs(self):
+        old_job = WorkflowJob.objects.create(
+            job_type="BOOKING_CONFIRMATION",
+            booking=self.booking,
+            status="IN_PROGRESS",
+            started_at=timezone.now() - timedelta(minutes=10),
+        )
+        WorkflowJob.objects.create(
+            job_type="BOOKING_EXPIRY",
+            booking=self.booking,
+            status="IN_PROGRESS",
+            started_at=timezone.now() - timedelta(minutes=2),
+        )
+
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.get("/api/workflows/stuck-jobs/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], old_job.id)
+
+    def test_failed_jobs_view_supports_created_date_filter(self):
+        job = WorkflowJob.objects.create(
+            job_type="BOOKING_CONFIRMATION",
+            booking=self.booking,
+            status="FAILED",
+        )
+
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.get(
+            f"/api/workflows/failed-jobs/?created_date={timezone.now().date().isoformat()}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], job.id)
+
     @patch("workflows.views.process_workflow_job.delay")
     def test_retry_job_resets_state_and_requeues(self, mock_delay):
         job = WorkflowJob.objects.create(
@@ -103,6 +175,10 @@ class TestWorkflow(TestCase):
             status="FAILED",
             retry_count=2,
             last_error="smtp failed",
+            is_email_sent=True,
+            started_at=timezone.now() - timedelta(minutes=1),
+            completed_at=timezone.now(),
+            result={"message": "previous result"},
         )
 
         self.client.force_authenticate(user=self.admin_user)
@@ -113,6 +189,10 @@ class TestWorkflow(TestCase):
         self.assertEqual(job.status, "PENDING")
         self.assertEqual(job.retry_count, 0)
         self.assertEqual(job.last_error, "")
+        self.assertIsNone(job.started_at)
+        self.assertIsNone(job.completed_at)
+        self.assertIsNone(job.result)
+        self.assertFalse(job.is_email_sent)
         mock_delay.assert_called_once_with(job.id)
 
     @patch("workflows.views.process_workflow_job.delay")
