@@ -12,7 +12,7 @@ This project focuses on solving real-world backend challenges like:
 
 ## 🧱 Tech Stack
 
-* **Backend:** Django 6.0, Django REST Framework
+* **Backend:** Django 5.x, Django REST Framework
 * **Auth:** JWT (djangorestframework-simplejwt)
 * **Database:** PostgreSQL
 * **Cache / Queue:** Redis
@@ -29,6 +29,8 @@ This project focuses on solving real-world backend challenges like:
 * `POST /api/auth/token/` for access + refresh tokens
 * `POST /api/auth/token/refresh/`
 * `users.User` includes `role` (`ADMIN`, `ORGANIZER`, `USER`)
+* Registration normalizes email to lowercase and always creates `USER` role accounts
+* Django password validation is enforced during registration
 
 ### ✅ Event Management
 
@@ -40,12 +42,14 @@ This project focuses on solving real-world backend challenges like:
 * `available_seats` is annotated in read responses
 * Event creation auto-generates seats (`events.Seat`) from `total_seats`
 * Event total seats update adjusts seats safely with transaction lock
+* Event seat reductions are blocked when higher-numbered seats still have active bookings
 * Events include `price` field for ticket pricing
 * model constraints:
   * `total_seats > 0`
   * `end_time > start_time`
   * `price >= 0`
   * unique `seat_number` per event
+  * `seat_number > 0`
 
 ### ✅ Booking System
 
@@ -62,7 +66,7 @@ This project focuses on solving real-world backend challenges like:
   * expiry is scheduled with a Celery workflow job
   * expired bookings free the seat for reuse
 * Booking confirmation workflow:
-  * confirmation emails are sent via Celery jobs
+  * confirmation emails are sent via Celery jobs when SMTP is configured
   * email notification payloads are generated on successful confirmation
 * Payment integration with simulated gateway:
   * Automatic payment processing on booking creation
@@ -76,12 +80,42 @@ This project focuses on solving real-world backend challenges like:
 * `Booking` model constraints:
   * unique `(idempotency_key, user)`
   * unique confirmed seat
+  * `retry_count >= 0`
+
+### ✅ Workflow Monitoring & Recovery
+
+* Admin-only workflow monitoring endpoints:
+  * `GET /api/workflows/jobs/`
+  * `GET /api/workflows/jobs/{id}/`
+  * `GET /api/workflows/stuck-jobs/`
+  * `GET /api/workflows/failed-jobs/`
+  * `POST /api/workflows/retry-job/{job_id}/`
+* Workflow list supports filtering by:
+  * `job_type`
+  * `status`
+  * `created_date=YYYY-MM-DD`
+* Failed jobs endpoint supports filtering by:
+  * `job_type`
+  * `created_date=YYYY-MM-DD`
+* Stuck jobs endpoint surfaces jobs in `IN_PROGRESS` for more than 5 minutes
+* Retrying a failed job resets retry metadata, timestamps, result payload, and email-sent state before requeueing
+* `WorkflowJob` tracks:
+  * `status`
+  * `retry_count`
+  * `last_error`
+  * `started_at`
+  * `completed_at`
+  * `result`
+  * `payload`
+* Workflow job constraints and indexing:
+  * `0 <= retry_count <= 5`
+  * composite index on `(status, job_type)`
 
 ### ✅ Infrastructure
 
 * `Dockerfile` and `docker-compose.yml` with `db`, `redis`, `web`, `celery`, and `celery-beat`
-* `entrypoint.sh` waits for PostgreSQL, runs migrations, starts Django dev server
-* Environment-driven settings in `core/settings.py`
+* `entrypoint.sh` waits for PostgreSQL, runs migrations, and starts the Django dev server
+* Database and email settings are environment-driven in `core/settings.py`
 * Redis-backed Celery broker and result backend
 * Scheduled workflow requeue via Celery beat every 5 minutes
 * Email backend placeholders and workflow notification pipeline (optional SMTP config)
@@ -93,12 +127,13 @@ This project focuses on solving real-world backend challenges like:
 
 ### ✅ Tests
 
-* Unit test suites added for bookings, payments, events, and users
+* Unit test suites added for bookings, payments, events, users, and workflows
 
 ### ✅ Postman Support
 
 * `EventOps.postman_collection.json`
 * `event_ops.postman_environment.json`
+* Environment includes convenience variables for workflow endpoints such as `workflow_job_id` and `created_date`
 
 ---
 
@@ -149,7 +184,6 @@ docker compose up --build
 
 `entrypoint.sh` handles:
 * waiting for Postgres on `db:5432`
-* `python manage.py makemigrations`
 * `python manage.py migrate`
 * `python manage.py runserver 0.0.0.0:8000`
 
@@ -166,6 +200,7 @@ docker compose exec web python manage.py createsuperuser
 6. Import Postman collection and environment:
 * Open Postman and import `EventOps.postman_collection.json` and `event_ops.postman_environment.json`
 * Set the environment to `event_ops` and update the base URL to `http://localhost:8000` if needed.
+* The bundled environment also includes starter values for `admin`, `organizer`, `user`, booking IDs, and workflow-job filters that you can adjust for your local data.
 
 ---
 
@@ -187,7 +222,6 @@ This project is designed to demonstrate:
 * Ability to handle **real-world concurrency issues**
 * Knowledge of **system design and architecture**
 * Experience with **production-like environments**
-
 
 
 

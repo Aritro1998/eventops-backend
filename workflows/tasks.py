@@ -29,7 +29,8 @@ def process_workflow_job(self, job_id):
             return
 
         job.status = "IN_PROGRESS"
-        job.save(update_fields=["status", "updated_at"])
+        job.started_at = timezone.now()
+        job.save(update_fields=["status", "started_at", "updated_at"])
 
     try:
 
@@ -45,7 +46,13 @@ def process_workflow_job(self, job_id):
         with transaction.atomic():
             job = WorkflowJob.objects.select_for_update().get(id=job_id)
             job.status = "COMPLETED"
-            job.save(update_fields=["status", "updated_at"])
+            job.completed_at = timezone.now()
+            job.result = {
+                "message": "Processed successfully",
+                "job_type": job.job_type,
+                "booking_id": job.booking_id,
+            }
+            job.save(update_fields=["status", "completed_at", "result", "updated_at"])
 
     except Exception as e:
         with transaction.atomic():
@@ -55,10 +62,13 @@ def process_workflow_job(self, job_id):
 
             if job.retry_count >= MAX_RETRIES:
                 job.status = "FAILED"
-                job.save(update_fields=["status", "retry_count", "last_error", "updated_at"])
+                job.completed_at = timezone.now()
+                job.save(update_fields=["status", "retry_count", "last_error", "updated_at", "completed_at"])
             else:
                 job.status = "PENDING"
-                job.save(update_fields=["status", "retry_count", "last_error", "updated_at"])
+                job.completed_at = None
+                job.result = None
+                job.save(update_fields=["status", "retry_count", "last_error", "updated_at", "completed_at", "result"])
 
         if job.status == "PENDING":
             # Requeue the job with a delay for retry

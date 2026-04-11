@@ -10,7 +10,11 @@ class WorkflowJobSerializer(ModelSerializer):
             "id",
             "job_type",
             "status",
+            "payload",           
+            "result",            
             "last_error",
             "retry_count",
+            "started_at",        
+            "completed_at",      
             "created_at"
         ]

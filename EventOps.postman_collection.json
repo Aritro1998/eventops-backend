@@ -12,11 +12,14 @@
         {
           "name": "Register",
           "request": {
+            "auth": {
+              "type": "noauth"
+            },
             "method": "POST",
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n    \"username\": \"{{user_username}}\",\n    \"email\": \"testuser@test.com\",\n    \"password\": \"{{user_password}}\"\n}",
+              "raw": "{\n  \"username\": \"{{user_username}}\",\n  \"email\": \"{{user_email}}\",\n  \"password\": \"{{user_password}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -44,24 +47,30 @@
             {
               "listen": "test",
               "script": {
+                "type": "text/javascript",
                 "exec": [
                   "const response = pm.response.json();",
                   "",
-                  "pm.environment.set(\"access_token\", response.access);",
-                  "pm.environment.set(\"refresh_token\", response.refresh);"
-                ],
-                "type": "text/javascript",
-                "packages": {},
-                "requests": {}
+                  "if (response.access) {",
+                  "  pm.environment.set(\"access_token\", response.access);",
+                  "}",
+                  "",
+                  "if (response.refresh) {",
+                  "  pm.environment.set(\"refresh_token\", response.refresh);",
+                  "}"
+                ]
               }
             }
           ],
           "request": {
+            "auth": {
+              "type": "noauth"
+            },
             "method": "POST",
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n    \"username\": \"{{user_username}}\",\n    \"password\": \"{{user_password}}\"\n}",
+              "raw": "{\n  \"username\": \"{{user_username}}\",\n  \"password\": \"{{user_password}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -86,11 +95,14 @@
         {
           "name": "Refresh Token",
           "request": {
+            "auth": {
+              "type": "noauth"
+            },
             "method": "POST",
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n    \"refresh\": \"{{refresh_token}}\"\n}",
+              "raw": "{\n  \"refresh\": \"{{refresh_token}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -116,214 +128,7 @@
       ]
     },
     {
-      "name": "Booking",
-      "item": [
-        {
-          "name": "Create Booking",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "exec": [
-                  "pm.environment.set(\"idempotency_key\", crypto.randomUUID());"
-                ],
-                "type": "text/javascript",
-                "packages": {},
-                "requests": {}
-              }
-            }
-          ],
-          "request": {
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{access_token}}",
-                  "type": "string"
-                }
-              ]
-            },
-            "method": "POST",
-            "header": [],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n    \"event\": 6,\n    \"seat\": 267,\n    \"idempotency_key\": \"{{idempotency_key}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{base_url}}/api/bookings/",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "bookings",
-                ""
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Bookings",
-          "protocolProfileBehavior": {
-            "disableBodyPruning": true
-          },
-          "request": {
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{access_token}}",
-                  "type": "string"
-                }
-              ]
-            },
-            "method": "GET",
-            "header": [],
-            "body": {
-              "mode": "raw",
-              "raw": "",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{base_url}}/api/bookings/",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "bookings",
-                ""
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Booking Detail",
-          "request": {
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{access_token}}",
-                  "type": "string"
-                }
-              ]
-            },
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/bookings/1/",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "bookings",
-                "1",
-                ""
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Cancel Booking",
-          "request": {
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{access_token}}",
-                  "type": "string"
-                }
-              ]
-            },
-            "method": "POST",
-            "header": [],
-            "body": {
-              "mode": "raw",
-              "raw": "",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{base_url}}/api/bookings/1/cancel/",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "bookings",
-                "1",
-                "cancel",
-                ""
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Retry Payment",
-          "request": {
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{access_token}}",
-                  "type": "string"
-                }
-              ]
-            },
-            "method": "POST",
-            "header": [],
-            "body": {
-              "mode": "raw",
-              "raw": "",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{base_url}}/api/bookings/6/retry-payment/",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "bookings",
-                "6",
-                "retry-payment",
-                ""
-              ]
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
-      "name": "Event",
+      "name": "Events",
       "item": [
         {
           "name": "Create Event",
@@ -342,7 +147,7 @@
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n    \"name\": \"Music Fest\",\n    \"description\": \"Concert by Coldplay\",\n    \"start_time\": \"2026-04-10T10:00:00Z\",\n    \"end_time\": \"2026-04-10T17:00:00Z\",\n    \"total_seats\": 300,\n    \"price\": 700.00\n}",
+              "raw": "{\n  \"name\": \"Music Fest\",\n  \"description\": \"Concert by Coldplay\",\n  \"start_time\": \"2026-05-10T10:00:00Z\",\n  \"end_time\": \"2026-05-10T17:00:00Z\",\n  \"total_seats\": 300,\n  \"price\": 700.00\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -357,6 +162,57 @@
               "path": [
                 "api",
                 "events",
+                ""
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Events",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/events/?ordering=start_time",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "ordering",
+                  "value": "start_time"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Event Detail",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/events/{{event_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{event_id}}",
                 ""
               ]
             }
@@ -380,7 +236,7 @@
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n    \"name\": \"Updated Event\",\n    \"start_time\": \"2026-04-01T12:00:00Z\",\n    \"end_time\": \"2026-04-01T20:00:00Z\",\n    \"total_seats\": 150\n}",
+              "raw": "{\n  \"name\": \"Updated Event\",\n  \"description\": \"Updated description\",\n  \"start_time\": \"2026-05-11T12:00:00Z\",\n  \"end_time\": \"2026-05-11T20:00:00Z\",\n  \"total_seats\": 250,\n  \"price\": 900.00\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -388,14 +244,14 @@
               }
             },
             "url": {
-              "raw": "{{base_url}}/api/events/1/",
+              "raw": "{{base_url}}/api/events/{{event_id}}/",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
                 "events",
-                "1",
+                "{{event_id}}",
                 ""
               ]
             }
@@ -403,7 +259,7 @@
           "response": []
         },
         {
-          "name": "Partial Update",
+          "name": "Partial Update Event",
           "request": {
             "auth": {
               "type": "bearer",
@@ -419,7 +275,7 @@
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n    \"total_seats\": 200\n}",
+              "raw": "{\n  \"total_seats\": 200\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -427,14 +283,14 @@
               }
             },
             "url": {
-              "raw": "{{base_url}}/api/events/3/",
+              "raw": "{{base_url}}/api/events/{{event_id}}/",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
                 "events",
-                "3",
+                "{{event_id}}",
                 ""
               ]
             }
@@ -456,9 +312,55 @@
             },
             "method": "DELETE",
             "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/events/{{event_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "events",
+                "{{event_id}}",
+                ""
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Bookings",
+      "item": [
+        {
+          "name": "Create Booking",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set(\"idempotency_key\", crypto.randomUUID());"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n    \"total_seats\": 200\n}",
+              "raw": "{\n  \"event\": {{event_id}},\n  \"seat\": {{seat_id}},\n  \"idempotency_key\": \"{{idempotency_key}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -466,14 +368,13 @@
               }
             },
             "url": {
-              "raw": "{{base_url}}/api/events/1/",
+              "raw": "{{base_url}}/api/bookings/",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
-                "events",
-                "1",
+                "bookings",
                 ""
               ]
             }
@@ -481,39 +382,63 @@
           "response": []
         },
         {
-          "name": "List Events",
-          "protocolProfileBehavior": {
-            "disableBodyPruning": true
-          },
+          "name": "List Bookings",
           "request": {
             "auth": {
-              "type": "noauth"
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
             },
             "method": "GET",
             "header": [],
-            "body": {
-              "mode": "raw",
-              "raw": "",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
-              "raw": "{{base_url}}/api/events/?ordering=start_time",
+              "raw": "{{base_url}}/api/bookings/",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
-                "events",
+                "bookings",
+                ""
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Bookings By Status",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/bookings/?status=CONFIRMED",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
                 ""
               ],
               "query": [
                 {
-                  "key": "ordering",
-                  "value": "start_time"
+                  "key": "status",
+                  "value": "CONFIRMED"
                 }
               ]
             }
@@ -521,34 +446,333 @@
           "response": []
         },
         {
-          "name": "Get Event Detail",
-          "protocolProfileBehavior": {
-            "disableBodyPruning": true
-          },
+          "name": "Get Booking Detail",
           "request": {
             "auth": {
-              "type": "noauth"
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
             },
             "method": "GET",
             "header": [],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n    \"name\": \"Music Fest\",\n    \"start_time\": \"2026-04-01T10:00:00Z\",\n    \"end_time\": \"2026-04-01T18:00:00Z\",\n    \"total_seats\": 100\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
-              "raw": "{{base_url}}/api/events/1",
+              "raw": "{{base_url}}/api/bookings/{{booking_id}}/",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
-                "events",
-                "1"
+                "bookings",
+                "{{booking_id}}",
+                ""
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel Booking",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/bookings/{{booking_id}}/cancel/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{booking_id}}",
+                "cancel",
+                ""
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Retry Payment",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/bookings/{{booking_id}}/retry-payment/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{booking_id}}",
+                "retry-payment",
+                ""
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Workflows",
+      "item": [
+        {
+          "name": "List Workflow Jobs",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/workflows/jobs/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "workflows",
+                "jobs",
+                ""
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Workflow Jobs With Filters",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/workflows/jobs/?job_type=BOOKING_CONFIRMATION&status=FAILED&created_date={{created_date}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "workflows",
+                "jobs",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "job_type",
+                  "value": "BOOKING_CONFIRMATION"
+                },
+                {
+                  "key": "status",
+                  "value": "FAILED"
+                },
+                {
+                  "key": "created_date",
+                  "value": "{{created_date}}"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Workflow Job Detail",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/workflows/jobs/{{workflow_job_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "workflows",
+                "jobs",
+                "{{workflow_job_id}}",
+                ""
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Stuck Jobs",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/workflows/stuck-jobs/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "workflows",
+                "stuck-jobs",
+                ""
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Failed Jobs",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/workflows/failed-jobs/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "workflows",
+                "failed-jobs",
+                ""
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Failed Jobs By Date",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/workflows/failed-jobs/?job_type=BOOKING_CONFIRMATION&created_date={{created_date}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "workflows",
+                "failed-jobs",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "job_type",
+                  "value": "BOOKING_CONFIRMATION"
+                },
+                {
+                  "key": "created_date",
+                  "value": "{{created_date}}"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Retry Failed Job",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/workflows/retry-job/{{workflow_job_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "workflows",
+                "retry-job",
+                "{{workflow_job_id}}",
+                ""
               ]
             }
           },
@@ -557,67 +781,19 @@
       ]
     }
   ],
-  "auth": {
-    "type": "jwt",
-    "jwt": [
-      {
-        "key": "algorithm",
-        "value": "HS256",
-        "type": "string"
-      },
-      {
-        "key": "isSecretBase64Encoded",
-        "value": false,
-        "type": "boolean"
-      },
-      {
-        "key": "payload",
-        "value": "{}",
-        "type": "string"
-      },
-      {
-        "key": "addTokenTo",
-        "value": "header",
-        "type": "string"
-      },
-      {
-        "key": "headerPrefix",
-        "value": "Bearer",
-        "type": "string"
-      },
-      {
-        "key": "queryParamKey",
-        "value": "token",
-        "type": "string"
-      },
-      {
-        "key": "header",
-        "value": "{}",
-        "type": "string"
-      }
-    ]
-  },
   "event": [
     {
       "listen": "prerequest",
       "script": {
         "type": "text/javascript",
-        "packages": {},
-        "requests": {},
-        "exec": [
-          ""
-        ]
+        "exec": []
       }
     },
     {
       "listen": "test",
       "script": {
         "type": "text/javascript",
-        "packages": {},
-        "requests": {},
-        "exec": [
-          ""
-        ]
+        "exec": []
       }
     }
   ]
