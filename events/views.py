@@ -1,8 +1,10 @@
 from django.db.models import Max
 from django.db import transaction
 from django.utils import timezone
+from django.core.cache import cache
 from rest_framework import serializers
 from django.db.models import Count, Q, F
+from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.filters import OrderingFilter
@@ -37,6 +39,50 @@ class EventViewSet(ModelViewSet):
     filter_backends = [OrderingFilter]
     ordering = ['start_time']
 
+    def invalidate_event_cache(self, event_id):
+        """
+        Invalidate cache for a specific event and the event list when an event is updated or deleted.
+        """
+        cache.delete(f"event:{event_id}")
+        cache.delete_pattern("events:list:*")
+
+    def list(self, request, *args, **kwargs):
+        """Override list to implement caching for event listings."""
+        # Use the full query string so different filtered/ordered requests do not share one cache entry.
+        query_string = request.META.get("QUERY_STRING", "")
+        cache_key = f"events:list:{query_string or 'default'}"
+        # Check if the event list is already cached
+        cached_data = cache.get(cache_key)
+
+        if cached_data is not None:
+            return Response(cached_data)
+        
+        response = super().list(request, *args, **kwargs)
+        # Cache the response data for future requests with TTL of 5 minutes
+        cache.set(cache_key, response.data, timeout=300)
+
+        return response
+
+    def retrieve(self, request, *args, **kwargs):
+        """Override retrieve to implement caching for event details."""
+        # Determine the event ID from the URL kwargs using the lookup field or lookup URL kwarg.
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        # Get the event ID from the URL kwargs to use as part of the cache key for caching individual event details.
+        event_id = self.kwargs[lookup_url_kwarg]
+        # Retrieve event details with caching to improve performance for frequently accessed events.
+        cache_key = f'event:{event_id}'
+        # Check if the event details are already cached
+        cached_data = cache.get(cache_key)
+
+        if cached_data is not None:
+            return Response(cached_data)
+        
+        response = super().retrieve(request, *args, **kwargs)
+        # Cache the response data for future requests with TTL of 5 minutes
+        cache.set(cache_key, response.data, timeout=300)
+
+        return response
+
     def get_queryset(self):
         """
         Override get_queryset to ensure available_seats is always annotated for both list and retrieve actions.
@@ -64,13 +110,17 @@ class EventViewSet(ModelViewSet):
         Override to set the created_by field to the current user on event creation.
         After saving the event, we also create the corresponding seats based on total_seats.
         """
-        event = serializer.save(created_by=self.request.user)
+        with transaction.atomic():
+            event = serializer.save(created_by=self.request.user)
 
-        # After creating the event, create the corresponding seats based on total_seats
-        Seat.objects.bulk_create([
-            Seat(event=event, seat_number=i) 
-            for i in range(1, event.total_seats + 1)
-        ])
+            # After creating the event, create the corresponding seats based on total_seats
+            Seat.objects.bulk_create([
+                Seat(event=event, seat_number=i) 
+                for i in range(1, event.total_seats + 1)
+            ])
+
+            # Invalidate cache for the event list after creating a new event
+            transaction.on_commit(lambda: self.invalidate_event_cache(event.id))
 
     def perform_update(self, serializer):
         # We lock the event row so seat-count changes and seat table updates happen together.
@@ -99,7 +149,8 @@ class EventViewSet(ModelViewSet):
                 )
             elif new_total_seats == old_total_seats:
                 # If total_seats is unchanged, we can simply save the event without modifying seats
-                serializer.save()
+                updated_event = serializer.save()
+                transaction.on_commit(lambda: self.invalidate_event_cache(updated_event.id))
                 return
 
             # Save after validation
@@ -138,6 +189,16 @@ class EventViewSet(ModelViewSet):
                 # Remove the unbooked seats that are above the new total_seats
                 seats_to_remove.delete()
 
+            # Invalidate cache for the updated event and the event list after updating an event
+            transaction.on_commit(lambda: self.invalidate_event_cache(updated_event.id))
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            event_id = instance.id
+            super().perform_destroy(instance)
+            # Invalidate cache for the deleted event and the event list after deleting an event
+            transaction.on_commit(lambda: self.invalidate_event_cache(event_id))
+            
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             # Only authenticated users can create, update, or delete events
