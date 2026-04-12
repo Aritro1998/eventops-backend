@@ -1,9 +1,13 @@
+import logging
+
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 
 from core.throttles import AuthThrottle
 from .serializers import RegisterSerializer
+
+logger = logging.getLogger(__name__)
 
 # Create your views here.
 class RegisterView(APIView):
@@ -13,6 +17,15 @@ class RegisterView(APIView):
 
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
+
+        logger.info(
+            "user_registered",
+            extra={
+                "event": "user_registered",
+                "user_id": user.id,
+                "username": user.username,
+            }
+        )
         
         return Response(
             {

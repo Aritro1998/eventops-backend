@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -10,6 +12,8 @@ from core.throttles import BookingThrottle, DefaultThrottle
 from core.pagination import CustomPagination
 from payments.services import PaymentService
 from .serializers import BookingWriteSerializer, BookingReadSerializer
+
+logger = logging.getLogger(__name__)
 
 
 class BookingListView(APIView):
@@ -61,6 +65,14 @@ class BookingListView(APIView):
         if key:
             existing = BookingService.get_existing_booking(user, key)
             if existing:
+                logger.info(
+                    "booking_idempotency_hit",
+                    extra={
+                        "event": "booking_idempotency_hit",
+                        "user_id": user.id,
+                        "booking_id": existing.id,
+                    }
+                )
                 return respond_existing(existing)
 
         # 2. Validate request data
@@ -79,6 +91,15 @@ class BookingListView(APIView):
 
         # Handle seat conflict
         if seat_unavailable:
+            logger.warning(
+                "booking_seat_unavailable",
+                extra={
+                    "event": "booking_seat_unavailable",
+                    "user_id": user.id,
+                    "event_id": serializer.validated_data["event"].id,
+                    "seat_id": serializer.validated_data["seat"].id,
+                }
+            )
             return Response(
                 {"detail": "Seat already booked"},
                 status=status.HTTP_400_BAD_REQUEST
@@ -86,6 +107,14 @@ class BookingListView(APIView):
 
         # Idempotent retry
         if is_existing:
+            logger.info(
+                "booking_idempotency_recovered",
+                extra={
+                    "event": "booking_idempotency_recovered",
+                    "user_id": user.id,
+                    "booking_id": booking.id,
+                }
+            )
             return respond_existing(booking)
 
         # 4. Trigger payment workflow (outside transaction)
@@ -182,6 +211,15 @@ class BookingCancelView(APIView):
         try:
             booking = BookingService.cancel_booking(booking)
         except ValueError as e:
+            logger.warning(
+                "booking_cancel_rejected",
+                extra={
+                    "event": "booking_cancel_rejected",
+                    "user_id": request.user.id,
+                    "booking_id": booking.id,
+                    "status": booking.status,
+                }
+            )
             return Response(
                 {"detail": str(e)},
                 status=status.HTTP_400_BAD_REQUEST
@@ -214,6 +252,15 @@ class BookingRetryPaymentView(APIView):
 
         # Validate booking status
         if booking.status not in ["FAILED", "PENDING"]:
+            logger.warning(
+                "booking_retry_payment_rejected",
+                extra={
+                    "event": "booking_retry_payment_rejected",
+                    "user_id": request.user.id,
+                    "booking_id": booking.id,
+                    "status": booking.status,
+                }
+            )
             return Response(
                 {"detail": "Payment cannot be retried for this booking status."},
                 status=status.HTTP_400_BAD_REQUEST

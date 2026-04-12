@@ -1,3 +1,5 @@
+import logging
+
 from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
@@ -7,6 +9,8 @@ from django.core.mail import EmailMultiAlternatives
 
 from django.conf import settings
 from workflows.services import requeue_pending_jobs
+
+logger = logging.getLogger(__name__)
 
 @shared_task(bind=True, acks_late=True)
 def process_workflow_job(self, job_id):
@@ -25,11 +29,28 @@ def process_workflow_job(self, job_id):
         job = WorkflowJob.objects.select_for_update().get(id=job_id)
 
         if job.status != "PENDING":
+            logger.info(
+                "workflow_job_skipped",
+                extra={
+                    "event": "workflow_job_skipped",
+                    "workflow_job_id": job.id,
+                    "status": job.status,
+                }
+            )
             return
 
         job.status = "IN_PROGRESS"
         job.started_at = timezone.now()
         job.save(update_fields=["status", "started_at", "updated_at"])
+        logger.info(
+            "workflow_job_started",
+            extra={
+                "event": "workflow_job_started",
+                "workflow_job_id": job.id,
+                "job_type": job.job_type,
+                "booking_id": job.booking_id,
+            }
+        )
 
     try:
 
@@ -52,6 +73,15 @@ def process_workflow_job(self, job_id):
                 "booking_id": job.booking_id,
             }
             job.save(update_fields=["status", "completed_at", "result", "updated_at"])
+            logger.info(
+                "workflow_job_completed",
+                extra={
+                    "event": "workflow_job_completed",
+                    "workflow_job_id": job.id,
+                    "job_type": job.job_type,
+                    "booking_id": job.booking_id,
+                }
+            )
 
     except Exception as e:
         with transaction.atomic():
@@ -63,11 +93,31 @@ def process_workflow_job(self, job_id):
                 job.status = "FAILED"
                 job.completed_at = timezone.now()
                 job.save(update_fields=["status", "retry_count", "last_error", "updated_at", "completed_at"])
+                logger.exception(
+                    "workflow_job_failed",
+                    extra={
+                        "event": "workflow_job_failed",
+                        "workflow_job_id": job.id,
+                        "job_type": job.job_type,
+                        "booking_id": job.booking_id,
+                        "retry_count": job.retry_count,
+                    }
+                )
             else:
                 job.status = "PENDING"
                 job.completed_at = None
                 job.result = None
                 job.save(update_fields=["status", "retry_count", "last_error", "updated_at", "completed_at", "result"])
+                logger.warning(
+                    "workflow_job_retry_scheduled",
+                    extra={
+                        "event": "workflow_job_retry_scheduled",
+                        "workflow_job_id": job.id,
+                        "job_type": job.job_type,
+                        "booking_id": job.booking_id,
+                        "retry_count": job.retry_count,
+                    }
+                )
 
         if job.status == "PENDING":
             # Requeue the job with a delay for retry
@@ -82,6 +132,12 @@ def requeue_pending_jobs_task():
     """
     Celery task to requeue pending workflow jobs.
     """
+    logger.info(
+        "workflow_requeue_started",
+        extra={
+            "event": "workflow_requeue_started",
+        }
+    )
     requeue_pending_jobs()
 
 
@@ -150,6 +206,14 @@ def handle_booking_confirmation(job):
 
     # Skip delivery cleanly when SMTP is not configured.
     if not settings.EMAIL_HOST_USER:
+        logger.info(
+            "workflow_confirmation_email_skipped",
+            extra={
+                "event": "workflow_confirmation_email_skipped",
+                "workflow_job_id": job.id,
+                "booking_id": job.booking_id,
+            }
+        )
         return
 
     msg = EmailMultiAlternatives(
@@ -164,6 +228,14 @@ def handle_booking_confirmation(job):
 
     job.is_email_sent = True
     job.save(update_fields=["is_email_sent"])
+    logger.info(
+        "workflow_confirmation_email_sent",
+        extra={
+            "event": "workflow_confirmation_email_sent",
+            "workflow_job_id": job.id,
+            "booking_id": job.booking_id,
+        }
+    )
 
 
 def handle_booking_expiry(job):
@@ -187,3 +259,12 @@ def handle_booking_expiry(job):
 
         booking.status = "EXPIRED"
         booking.save(update_fields=["status", "updated_at"])
+        logger.info(
+            "booking_expired",
+            extra={
+                "event": "booking_expired",
+                "booking_id": booking.id,
+                "event_id": booking.event_id,
+                "seat_id": booking.seat_id,
+            }
+        )

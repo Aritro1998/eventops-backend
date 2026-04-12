@@ -1,3 +1,5 @@
+import logging
+
 from datetime import timedelta
 from django.utils import timezone
 from django.core.cache import cache
@@ -7,6 +9,8 @@ from .models import Booking
 from events.models import Seat
 from workflows.models import WorkflowJob
 from workflows.services import schedule_job
+
+logger = logging.getLogger(__name__)
 
 
 class BookingService:
@@ -25,6 +29,14 @@ class BookingService:
     def invalidate_event_cache(event_id):  
         cache.delete(f"event:{event_id}")
         cache.delete_pattern("events:list:*")
+        logger.info(
+            "event_cache_invalidated",
+            extra={
+                "event": "event_cache_invalidated",
+                "event_id": event_id,
+                "source": "booking_service",
+            }
+        )
 
     @staticmethod
     def get_existing_booking(user, key):
@@ -101,6 +113,15 @@ class BookingService:
                     # Check seat availability (considers expiry)
                     if not BookingService.is_seat_available(seat):
                         seat_unavailable = True
+                        logger.warning(
+                            "booking_create_seat_unavailable",
+                            extra={
+                                "event": "booking_create_seat_unavailable",
+                                "user_id": user.id,
+                                "event_id": validated_data["event"].id,
+                                "seat_id": seat.id,
+                            }
+                        )
                     else:
                         event = validated_data["event"]
 
@@ -123,6 +144,17 @@ class BookingService:
                             retry_count=0
                         )
 
+                        logger.info(
+                            "booking_created",
+                            extra={
+                                "event": "booking_created",
+                                "user_id": user.id,
+                                "event_id": event.id,
+                                "seat_id": seat.id,
+                                "booking_id": booking.id,
+                            }
+                        )
+
                         job = WorkflowJob.objects.create(
                             job_type="BOOKING_EXPIRY",
                             booking=booking,
@@ -130,6 +162,16 @@ class BookingService:
                             payload={
                                 "booking_id": booking.id,
                             },
+                        )
+
+                        logger.info(
+                            "workflow_job_scheduled",
+                            extra={
+                                "event": "workflow_job_scheduled",
+                                "job_type": "BOOKING_EXPIRY",
+                                "booking_id": booking.id,
+                                "workflow_job_id": job.id,
+                            }
                         )
 
                         schedule_job(job, delay_seconds=BookingService.EXPIRY_MINUTES * 60)
@@ -160,6 +202,17 @@ class BookingService:
 
         booking.status = "CANCELLED"
         booking.save(update_fields=["status", "updated_at"])
+
+        logger.info(
+            "booking_cancelled",
+            extra={
+                "event": "booking_cancelled",
+                "booking_id": booking.id,
+                "user_id": booking.user_id,
+                "event_id": booking.event_id,
+                "seat_id": booking.seat_id,
+            }
+        )
 
         transaction.on_commit(   # ADDED
             lambda: BookingService.invalidate_event_cache(event_id)
