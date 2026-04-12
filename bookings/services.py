@@ -1,6 +1,7 @@
-from django.db import transaction, IntegrityError
-from django.utils import timezone
 from datetime import timedelta
+from django.utils import timezone
+from django.core.cache import cache
+from django.db import transaction, IntegrityError
 
 from .models import Booking
 from events.models import Seat
@@ -19,6 +20,11 @@ class BookingService:
     """
 
     EXPIRY_MINUTES = 15
+
+    @staticmethod
+    def invalidate_event_cache(event_id):  
+        cache.delete(f"event:{event_id}")
+        cache.delete_pattern("events:list:*")
 
     @staticmethod
     def get_existing_booking(user, key):
@@ -149,8 +155,14 @@ class BookingService:
 
         if booking.status != "CONFIRMED":
             raise ValueError("Only CONFIRMED bookings can be CANCELLED.")
+        
+        event_id = booking.event_id
 
         booking.status = "CANCELLED"
         booking.save(update_fields=["status", "updated_at"])
+
+        transaction.on_commit(   # ADDED
+            lambda: BookingService.invalidate_event_cache(event_id)
+        )
 
         return booking

@@ -40,6 +40,8 @@ This project focuses on solving real-world backend challenges like:
   * `POST /api/events/` (admin/organizer only)
   * `PUT/PATCH/DELETE` with `IsAdminOrOrganizer`
 * `available_seats` is annotated in read responses
+* Event list and detail responses are cached in Redis for 5 minutes
+* Event cache entries are invalidated after event create, update, and delete operations
 * Event creation auto-generates seats (`events.Seat`) from `total_seats`
 * Event total seats update adjusts seats safely with transaction lock
 * Event seat reductions are blocked when higher-numbered seats still have active bookings
@@ -77,6 +79,7 @@ This project focuses on solving real-world backend challenges like:
 * `GET /api/bookings/` (user scope + optional `?status=` filter + pagination)
 * `GET /api/bookings/{id}/`
 * `POST /api/bookings/{id}/cancel/` sets `CANCELLED`
+* Event cache is invalidated when a payment confirms a booking or a confirmed booking is cancelled
 * `Booking` model constraints:
   * unique `(idempotency_key, user)`
   * unique confirmed seat
@@ -222,6 +225,5 @@ This project is designed to demonstrate:
 * Ability to handle **real-world concurrency issues**
 * Knowledge of **system design and architecture**
 * Experience with **production-like environments**
-
 
 

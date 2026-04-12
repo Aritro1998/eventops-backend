@@ -1,13 +1,12 @@
 from celery import shared_task
 from django.db import transaction
+from django.utils import timezone
 from bookings.models import Booking
 from workflows.models import WorkflowJob
 from django.core.mail import EmailMultiAlternatives
-from django.utils import timezone
 
 from django.conf import settings
 from workflows.services import requeue_pending_jobs
-
 
 @shared_task(bind=True, acks_late=True)
 def process_workflow_job(self, job_id):
