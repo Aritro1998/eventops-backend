@@ -164,6 +164,7 @@ cd eventops-backend
 ```env
 DEBUG=True
 SECRET_KEY=dev-secret-key
+DJANGO_SETTINGS_MODULE=core.settings.dev
 DB_NAME=eventops
 DB_USER=postgres
 DB_PASSWORD=postgres
@@ -193,6 +194,35 @@ If you install dependencies outside Docker, make sure `python-json-logger` from 
 * waiting for Postgres on `db:5432`
 * `python manage.py migrate`
 * `python manage.py runserver 0.0.0.0:8000`
+
+### Settings Modules
+
+The project now uses split Django settings:
+
+* `core.settings.base`
+* `core.settings.dev`
+* `core.settings.prod`
+
+Default local entry points (`manage.py`, `wsgi.py`, `asgi.py`, and `celery.py`) use:
+
+```env
+DJANGO_SETTINGS_MODULE=core.settings.dev
+```
+
+To run with production settings, set:
+
+```env
+DJANGO_SETTINGS_MODULE=core.settings.prod
+```
+
+Production hosts are loaded from the `ALLOWED_HOSTS` environment variable as a comma-separated list.
+
+Example:
+
+```env
+DJANGO_SETTINGS_MODULE=core.settings.prod
+ALLOWED_HOSTS=example.com,www.example.com,api.example.com
+```
 
 4. Create superuser (optional):
 
@@ -229,4 +259,3 @@ This project is designed to demonstrate:
 * Ability to handle **real-world concurrency issues**
 * Knowledge of **system design and architecture**
 * Experience with **production-like environments**
-
