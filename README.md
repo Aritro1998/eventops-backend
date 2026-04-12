@@ -120,6 +120,8 @@ This project focuses on solving real-world backend challenges like:
 * `entrypoint.sh` waits for PostgreSQL, runs migrations, and starts the Django dev server
 * Database and email settings are environment-driven in `core/settings.py`
 * Redis-backed Celery broker and result backend
+* JSON-formatted application logs are emitted to stdout using `python-json-logger`
+* Structured logs are added around key write-paths such as event changes, booking creation/cancellation, payment outcomes, and workflow processing
 * Scheduled workflow requeue via Celery beat every 5 minutes
 * Email backend placeholders and workflow notification pipeline (optional SMTP config)
 * Custom pagination in `core/pagination.py`
@@ -185,6 +187,8 @@ EMAIL_USE_TLS=True
 docker compose up --build
 ```
 
+If you install dependencies outside Docker, make sure `python-json-logger` from `requirements.txt` is installed so Django can load the JSON log formatter from `core/settings.py`.
+
 `entrypoint.sh` handles:
 * waiting for Postgres on `db:5432`
 * `python manage.py migrate`
@@ -225,5 +229,4 @@ This project is designed to demonstrate:
 * Ability to handle **real-world concurrency issues**
 * Knowledge of **system design and architecture**
 * Experience with **production-like environments**
-
 

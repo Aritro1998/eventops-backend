@@ -1,3 +1,5 @@
+import logging
+
 from django.db.models import Max
 from django.db import transaction
 from django.utils import timezone
@@ -12,6 +14,8 @@ from rest_framework.filters import OrderingFilter
 from .models import Event, Seat
 from core.permissions import IsAdminOrOrganizer
 from .serializers import EventReadSerializer, EventWriteSerializer
+
+logger = logging.getLogger(__name__)
 
 # Create your views here.
 class EventViewSet(ModelViewSet):
@@ -45,6 +49,13 @@ class EventViewSet(ModelViewSet):
         """
         cache.delete(f"event:{event_id}")
         cache.delete_pattern("events:list:*")
+        logger.info(
+            "event_cache_invalidated",
+            extra={
+                "event": "event_cache_invalidated",
+                "event_id": event_id,
+            }
+        )
 
     def list(self, request, *args, **kwargs):
         """Override list to implement caching for event listings."""
@@ -119,6 +130,16 @@ class EventViewSet(ModelViewSet):
                 for i in range(1, event.total_seats + 1)
             ])
 
+            logger.info(
+                "event_created",
+                extra={
+                    "event": "event_created",
+                    "event_id": event.id,
+                    "created_by_user_id": self.request.user.id,
+                    "total_seats": event.total_seats,
+                }
+            )
+
             # Invalidate cache for the event list after creating a new event
             transaction.on_commit(lambda: self.invalidate_event_cache(event.id))
 
@@ -144,12 +165,31 @@ class EventViewSet(ModelViewSet):
             # Validate that the new total_seats is not less than the number of already booked seats
             if new_total_seats < max_booked_seat:
                 # Validate that the new total_seats is not less than the number of already booked seats
+                logger.warning(
+                    "event_seat_reduction_blocked",
+                    extra={
+                        "event": "event_seat_reduction_blocked",
+                        "event_id": event.id,
+                        "requested_total_seats": new_total_seats,
+                        "max_booked_seat": max_booked_seat,
+                    }
+                )
                 raise serializers.ValidationError(
                     f"Cannot reduce total seats below the highest booked seat number ({max_booked_seat})"
                 )
             elif new_total_seats == old_total_seats:
                 # If total_seats is unchanged, we can simply save the event without modifying seats
                 updated_event = serializer.save()
+                logger.info(
+                    "event_updated",
+                    extra={
+                        "event": "event_updated",
+                        "event_id": updated_event.id,
+                        "updated_by_user_id": self.request.user.id,
+                        "old_total_seats": old_total_seats,
+                        "new_total_seats": updated_event.total_seats,
+                    }
+                )
                 transaction.on_commit(lambda: self.invalidate_event_cache(updated_event.id))
                 return
 
@@ -177,6 +217,14 @@ class EventViewSet(ModelViewSet):
                 ).exists()
 
                 if active_bookings_exist:
+                    logger.warning(
+                        "event_active_booking_reduction_blocked",
+                        extra={
+                            "event": "event_active_booking_reduction_blocked",
+                            "event_id": updated_event.id,
+                            "requested_total_seats": updated_event.total_seats,
+                        }
+                    )
                     raise serializers.ValidationError(
                         "Cannot reduce total seats because some higher-numbered seats have active bookings."
                     )
@@ -189,6 +237,17 @@ class EventViewSet(ModelViewSet):
                 # Remove the unbooked seats that are above the new total_seats
                 seats_to_remove.delete()
 
+            logger.info(
+                "event_updated",
+                extra={
+                    "event": "event_updated",
+                    "event_id": updated_event.id,
+                    "updated_by_user_id": self.request.user.id,
+                    "old_total_seats": old_total_seats,
+                    "new_total_seats": updated_event.total_seats,
+                }
+            )
+
             # Invalidate cache for the updated event and the event list after updating an event
             transaction.on_commit(lambda: self.invalidate_event_cache(updated_event.id))
 
@@ -196,6 +255,14 @@ class EventViewSet(ModelViewSet):
         with transaction.atomic():
             event_id = instance.id
             super().perform_destroy(instance)
+            logger.info(
+                "event_deleted",
+                extra={
+                    "event": "event_deleted",
+                    "event_id": event_id,
+                    "deleted_by_user_id": self.request.user.id,
+                }
+            )
             # Invalidate cache for the deleted event and the event list after deleting an event
             transaction.on_commit(lambda: self.invalidate_event_cache(event_id))
             

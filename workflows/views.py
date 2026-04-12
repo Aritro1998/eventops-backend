@@ -1,3 +1,5 @@
+import logging
+
 from datetime import timedelta
 
 from rest_framework import status
@@ -14,6 +16,8 @@ from core.permissions import IsRoleAdmin
 from rest_framework.response import Response
 from workflows.tasks import process_workflow_job
 from workflows.serializers import WorkflowJobSerializer
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowJobListView(ListAPIView):
@@ -104,6 +108,15 @@ class RetryJobView(APIView):
         job = get_object_or_404(WorkflowJob, id=job_id)
 
         if job.status != "FAILED":
+            logger.warning(
+                "workflow_retry_rejected",
+                extra={
+                    "event": "workflow_retry_rejected",
+                    "workflow_job_id": job.id,
+                    "status": job.status,
+                    "requested_by_user_id": request.user.id,
+                }
+            )
             return Response({"error": "Job not in failed state"}, status=status.HTTP_400_BAD_REQUEST)
 
         job.status = "PENDING"
@@ -127,6 +140,15 @@ class RetryJobView(APIView):
         )
 
         process_workflow_job.delay(job.id)
+        logger.info(
+            "workflow_job_requeued",
+            extra={
+                "event": "workflow_job_requeued",
+                "workflow_job_id": job.id,
+                "job_type": job.job_type,
+                "requested_by_user_id": request.user.id,
+            }
+        )
 
         serializer = WorkflowJobSerializer(job)
 
