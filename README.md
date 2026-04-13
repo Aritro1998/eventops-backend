@@ -10,6 +10,78 @@ This project focuses on solving real-world backend challenges like:
 
 ---
 
+## 🧠 System Architecture Overview
+
+The system uses a layered backend architecture:
+
+```text
+Client
+  |
+  v
+DRF API Layer
+  |
+  v
+Service Layer
+  |
+  +--> PostgreSQL (events, seats, bookings, workflow jobs)
+  |
+  +--> Redis (cache + Celery broker/result backend)
+  |
+  v
+WorkflowJob persistence
+  |
+  v
+Celery Workers
+  |
+  +--> booking expiry handling
+  +--> confirmation delivery
+```
+
+Background workflows are coordinated through a persistent `WorkflowJob` model and executed by `Celery` workers for async follow-up tasks such as booking expiry handling and confirmation delivery.
+
+### Booking Flow
+
+1. The client sends a booking request to `POST /api/bookings/`.
+2. The API layer authenticates the user, validates input, and applies throttling.
+3. `BookingService` performs an idempotency check and re-checks it again inside `transaction.atomic()`.
+4. The seat row is locked with `select_for_update()` to prevent concurrent seat claims.
+5. A `PENDING` booking is created in PostgreSQL with an expiry timestamp.
+6. A `WorkflowJob` is created to expire the booking later if it is not confirmed in time.
+7. Payment is processed in the request flow; on success the booking becomes `CONFIRMED`.
+8. A confirmation workflow job is queued on state transition, and Celery workers handle email delivery and expiry processing in the background.
+9. Event cache entries are invalidated on write paths that affect seat availability.
+
+This architecture is designed to provide:
+
+* concurrency safety for seat allocation
+* retry-safe booking requests via idempotency
+* durable async workflow tracking beyond the task queue alone
+* cache consistency after state changes
+
+## ⚙️ Key Engineering Decisions
+
+* Used `select_for_update()` for row-level locking to prevent double booking under concurrency
+* Implemented per-user idempotency keys so booking creation is safe to retry
+* Added a `WorkflowJob` model for persistent async job tracking instead of relying on Celery state alone
+* Used Redis for both caching and Celery infrastructure
+* Combined database constraints, targeted indexes, and a composite workflow index for data integrity and query efficiency
+* Tied cache invalidation to write operations that change event or seat availability state
+
+## 🚀 Performance & Scaling Highlights
+
+* Optimized hot paths with `select_related`, Redis caching, and targeted database indexes
+* Cached event list and detail responses to reduce repeated read load on PostgreSQL
+* Added a concurrency test with parallel booking attempts to verify that at most one booking reaches `CONFIRMED` for the same seat
+* Enforced uniqueness for confirmed seat bookings at the database level as a final safety net
+* Applied DRF throttling on auth and booking endpoints to reduce abuse risk
+
+## 📊 Observability
+
+* Structured JSON logging is configured through `python-json-logger`
+* Key workflows emit logs for booking creation, payment outcomes, cache invalidation, workflow execution, retries, and failures
+* `WorkflowJob` tracks async lifecycle state including `status`, `retry_count`, `last_error`, `started_at`, `completed_at`, and `result`
+* Admin APIs expose failed jobs, stuck jobs, and retry actions for operational recovery
+
 ## 🧱 Tech Stack
 
 * **Backend:** Django 5.x, Django REST Framework
@@ -21,132 +93,51 @@ This project focuses on solving real-world backend challenges like:
 
 ---
 
-## ✨ Implemented Capabilities
+## ✨ Core Capabilities
 
 ### ✅ Authentication & Users
 
-* `POST /api/auth/register/` with `username`, `email`, `password`
-* `POST /api/auth/token/` for access + refresh tokens
-* `POST /api/auth/token/refresh/`
-* `users.User` includes `role` (`ADMIN`, `ORGANIZER`, `USER`)
-* Registration normalizes email to lowercase and always creates `USER` role accounts
-* Django password validation is enforced during registration
+* JWT-based auth with registration, login, and token refresh endpoints
+* `users.User` supports `ADMIN`, `ORGANIZER`, and `USER` roles
+* Registration normalizes email and enforces Django password validation
 
 ### ✅ Event Management
 
-* CRUD via `api/events/` using `EventViewSet`
-  * `GET /api/events/`
-  * `GET /api/events/{id}/`
-  * `POST /api/events/` (admin/organizer only)
-  * `PUT/PATCH/DELETE` with `IsAdminOrOrganizer`
-* `available_seats` is annotated in read responses
+* Event CRUD with role-aware write permissions
+* `available_seats` is exposed in read responses
 * Event list and detail responses are cached in Redis for 5 minutes
-* Event cache entries are invalidated after event create, update, and delete operations
-* Event creation auto-generates seats (`events.Seat`) from `total_seats`
-* Event total seats update adjusts seats safely with transaction lock
-* Event seat reductions are blocked when higher-numbered seats still have active bookings
-* Events include `price` field for ticket pricing
-* model constraints:
-  * `total_seats > 0`
-  * `end_time > start_time`
-  * `price >= 0`
-  * unique `seat_number` per event
-  * `seat_number > 0`
+* Event writes invalidate cache entries automatically
+* Seat generation and seat-count updates are handled safely inside transactional logic
+* Database constraints enforce event and seat integrity
 
 ### ✅ Booking System
 
-* `POST /api/bookings/` with:
-  * `event`, `seat`, `idempotency_key`
-* Amount is automatically set from the event's price (not user input)
-* Idempotency + repeatable client safety:
-  * first checks `user + idempotency_key`
-  * re-checks inside `transaction.atomic()`
-* Row-level locking via `Seat.objects.select_for_update()`
-* CONFIRMED seat uniqueness enforced at DB level
-* Booking expiration workflow:
-  * bookings expire after 15 minutes if not confirmed
-  * expiry is scheduled with a Celery workflow job
-  * expired bookings free the seat for reuse
-* Booking confirmation workflow:
-  * confirmation emails are sent via Celery jobs when SMTP is configured
-  * email notification payloads are generated on successful confirmation
-* Payment integration with simulated gateway:
-  * Automatic payment processing on booking creation
-  * Retry logic with `POST /api/bookings/{id}/retry-payment/`
-  * Retry limits: 3 attempts
-  * Booking statuses: `PENDING`, `CONFIRMED`, `FAILED`, `EXPIRED`, `CANCELLED`
-* Rate limiting (throttling) on booking endpoints to prevent abuse
-* `GET /api/bookings/` (user scope + optional `?status=` filter + pagination)
-* `GET /api/bookings/{id}/`
-* `POST /api/bookings/{id}/cancel/` sets `CANCELLED`
-* Event cache is invalidated when a payment confirms a booking or a confirmed booking is cancelled
-* `Booking` model constraints:
-  * unique `(idempotency_key, user)`
-  * unique confirmed seat
-  * `retry_count >= 0`
+* Booking creation uses idempotency keys, transactional re-checks, and row-level seat locking
+* Confirmed seat uniqueness is enforced at the database level
+* Payment flow supports retries and expiration handling
+* Booking expiry and confirmation follow-up actions are managed through Celery-backed workflow jobs
+* Booking endpoints support filtering, pagination, cancellation, and abuse protection via throttling
+* Cache is invalidated when booking state changes affect seat availability
 
 ### ✅ Workflow Monitoring & Recovery
 
-* Admin-only workflow monitoring endpoints:
-  * `GET /api/workflows/jobs/`
-  * `GET /api/workflows/jobs/{id}/`
-  * `GET /api/workflows/stuck-jobs/`
-  * `GET /api/workflows/failed-jobs/`
-  * `POST /api/workflows/retry-job/{job_id}/`
-* Workflow list supports filtering by:
-  * `job_type`
-  * `status`
-  * `created_date=YYYY-MM-DD`
-* Failed jobs endpoint supports filtering by:
-  * `job_type`
-  * `created_date=YYYY-MM-DD`
-* Stuck jobs endpoint surfaces jobs in `IN_PROGRESS` for more than 5 minutes
-* Retrying a failed job resets retry metadata, timestamps, result payload, and email-sent state before requeueing
-* `WorkflowJob` tracks:
-  * `status`
-  * `retry_count`
-  * `last_error`
-  * `started_at`
-  * `completed_at`
-  * `result`
-  * `payload`
-* Workflow job constraints and indexing:
-  * `0 <= retry_count <= 5`
-  * composite index on `(status, job_type)`
+* Admin endpoints support workflow listing, failed-job inspection, stuck-job detection, and manual retries
+* Workflow jobs can be filtered by type, status, and creation date
+* Retry operations reset workflow state before requeueing
 
-### ✅ Infrastructure
+### ✅ Infrastructure & Tooling
 
-* `Dockerfile` and `docker-compose.yml` with `db`, `redis`, `web`, `celery`, and `celery-beat`
-* `entrypoint.sh` waits for PostgreSQL, runs migrations, and starts the Django dev server
-* Database and email settings are environment-driven in `core/settings.py`
-* Redis-backed Celery broker and result backend
-* JSON-formatted application logs are emitted to stdout using `python-json-logger`
-* Structured logs are added around key write-paths such as event changes, booking creation/cancellation, payment outcomes, and workflow processing
-* Scheduled workflow requeue via Celery beat every 5 minutes
-* Email backend placeholders and workflow notification pipeline (optional SMTP config)
-* Custom pagination in `core/pagination.py`
-* Rate limiting/throttling configured:
-  * Booking endpoints: 5 requests/min per user
-  * Auth endpoints: 10 requests/min per user
-  * Default: 100 requests/min per user
-
-### ✅ Tests
-
-* Unit test suites added for bookings, payments, events, users, and workflows
-
-### ✅ Postman Support
-
-* `EventOps.postman_collection.json`
-* `event_ops.postman_environment.json`
-* Environment includes convenience variables for workflow endpoints such as `workflow_job_id` and `created_date`
+* Docker Compose includes `db`, `redis`, `web`, `celery`, and `celery-beat`
+* Redis powers both caching and Celery infrastructure
+* Structured JSON logs are emitted for key operational paths
+* Test suites cover bookings, payments, events, users, and workflows
+* Postman collection and environment files are included for quick API exploration
 
 ---
 
-## 🚧 In Progress
+## 📌 Why This Project?
 
-* Role-Based Access Control (RBAC) beyond events
-* Analytics endpoints (revenue, bookings, etc.)
-* API documentation / OpenAPI schema generation
+This repository is built to showcase backend engineering beyond basic CRUD, with a focus on **concurrency control**, **service-layer design**, **async workflow reliability**, and **production-style operational thinking**.
 
 ---
 
@@ -250,12 +241,3 @@ docker compose exec web python manage.py createsuperuser
 * API docs and endpoint discovery
 
 ---
-
-## 📌 Why This Project?
-
-This project is designed to demonstrate:
-
-* Strong understanding of **backend fundamentals**
-* Ability to handle **real-world concurrency issues**
-* Knowledge of **system design and architecture**
-* Experience with **production-like environments**
