@@ -120,10 +120,12 @@ def process_workflow_job(self, job_id):
                 )
 
         if job.status == "PENDING":
+            # Exponential backoff delay calculation
+            delay = 5 * (2 ** (job.retry_count - 1))
             # Requeue the job with a delay for retry
             process_workflow_job.apply_async(
                 args=[job.id],
-                countdown=5
+                countdown=delay
             )
 
 
