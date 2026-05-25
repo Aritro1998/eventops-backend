@@ -32,6 +32,17 @@ services:
       - db
       - redis
 
+  gradio:
+    build: .
+    container_name: eventops_gradio
+    command: python gradio_app.py
+    volumes:
+      - .:/app
+    ports:
+      - "7860:7860"
+    depends_on:
+      - web
+
   celery:
     build: .
     container_name: eventops_celery
