@@ -1,4 +1,4 @@
-import uuid
+from datetime import datetime
 from datetime import timedelta
 
 from django.test import TestCase
@@ -125,3 +125,33 @@ class TestEvent(TestCase):
         response = self.client.get(f"/api/events/{event.id}/")
 
         self.assertEqual(response.status_code, 200)
+
+    def test_list_events_filters_by_start_date(self):
+        matching_event = Event.objects.create(
+            name="Matching Event",
+            total_seats=100,
+            start_time=timezone.make_aware(datetime(2026, 6, 10, 14, 30)),
+            end_time=timezone.make_aware(datetime(2026, 6, 10, 16, 30)),
+            created_by=self.organizer,
+            price=100
+        )
+        Event.objects.create(
+            name="Other Event",
+            total_seats=100,
+            start_time=timezone.make_aware(datetime(2026, 6, 11, 14, 30)),
+            end_time=timezone.make_aware(datetime(2026, 6, 11, 16, 30)),
+            created_by=self.organizer,
+            price=100
+        )
+
+        response = self.client.get("/api/events/?date=2026-06-10")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["id"], matching_event.id)
+
+    def test_list_events_rejects_invalid_date_filter(self):
+        response = self.client.get("/api/events/?date=06-10-2026")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("date", response.data)

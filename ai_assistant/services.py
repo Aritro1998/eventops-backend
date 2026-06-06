@@ -58,6 +58,8 @@ class AIAssistantService:
         if message.tool_calls:
             tool_call = message.tool_calls[0]
             tool_name = tool_call.function.name
+            args = json.loads(tool_call.function.arguments)
+            date_filter = args.get("date_filter", None)
             
             # Find function in registry and execute
             tool_function = TOOL_REGISTRY.get(tool_name)
@@ -65,7 +67,7 @@ class AIAssistantService:
             messages.append(message)
 
             if tool_function:
-                tool_result = tool_function()
+                tool_result = tool_function(date_filter=date_filter)
                 messages.append(
                     {
                         "role": "tool",

@@ -1,11 +1,10 @@
 import logging
 
-from django.db.models import Max
 from django.db import transaction
+from django.db.models import Max, Q
 from django.utils import timezone
 from django.core.cache import cache
 from rest_framework import serializers
-from django.db.models import Count, Q, F
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.viewsets import ModelViewSet
@@ -58,8 +57,28 @@ class EventViewSet(ModelViewSet):
             }
         )
 
+    def get_queryset(self):
+        """
+        Override get_queryset to ensure available_seats is always annotated for both list and retrieve actions.
+        For create/update actions, we return the base queryset without annotation since available_seats is not relevant.
+        """
+        if self.action in ['list', 'retrieve']:
+            # Get date filter from query params
+            date_filter = self.request.query_params.get('date', None)
+            # Annotate the queryset with available seats for both list and retrieve actions
+            return EventService.get_events_with_available_seats(date_filter=date_filter)
+    
+        return self.queryset
+
+    def get_serializer_class(self):
+        """Use different serializers for read and write operations."""
+        if self.action in ['list', 'retrieve']:
+            return self.serializer_class
+        return EventWriteSerializer
+    
     def list(self, request, *args, **kwargs):
         """Override list to implement caching for event listings."""
+
         # Use the full query string so different filtered/ordered requests do not share one cache entry.
         query_string = request.META.get("QUERY_STRING", "")
         cache_key = f"events:list:{query_string or 'default'}"
@@ -94,24 +113,7 @@ class EventViewSet(ModelViewSet):
         cache.set(cache_key, response.data, timeout=300)
 
         return response
-
-    def get_queryset(self):
-        """
-        Override get_queryset to ensure available_seats is always annotated for both list and retrieve actions.
-        For create/update actions, we return the base queryset without annotation since available_seats is not relevant.
-        """
-        if self.action in ['list', 'retrieve']:
-            # Annotate the queryset with available seats for both list and retrieve actions
-            return EventService.get_events_with_available_seats()
-    
-        return self.queryset
-    
-    def get_serializer_class(self):
-        """Use different serializers for read and write operations."""
-        if self.action in ['list', 'retrieve']:
-            return self.serializer_class
-        return EventWriteSerializer
-    
+   
     def perform_create(self, serializer):
         """
         Override to set the created_by field to the current user on event creation.
