@@ -12,6 +12,7 @@ from rest_framework.viewsets import ModelViewSet
 from rest_framework.filters import OrderingFilter
 
 from .models import Event, Seat
+from .services import EventService
 from core.permissions import IsAdminOrOrganizer
 from .serializers import EventReadSerializer, EventWriteSerializer
 
@@ -101,13 +102,8 @@ class EventViewSet(ModelViewSet):
         """
         if self.action in ['list', 'retrieve']:
             # Annotate the queryset with available seats for both list and retrieve actions
-            return self.queryset.annotate(
-                confirmed_bookings=Count(
-                    'bookings',
-                    filter=Q(bookings__status='CONFIRMED')
-                ),
-                available_seats=F('total_seats') - F('confirmed_bookings')
-            )
+            return EventService.get_events_with_available_seats()
+    
         return self.queryset
     
     def get_serializer_class(self):
