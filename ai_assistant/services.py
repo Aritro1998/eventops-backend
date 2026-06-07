@@ -4,13 +4,23 @@ from core.settings.base import OPENAI_API_KEY
 from ai_assistant.tools.registry import TOOL_REGISTRY
 from ai_assistant.tools.schemas import GET_ALL_EVENTS_TOOL
 
-SYSTEM_PROMPT = """
-    You are an assistant for EventOps platform. 
-    Answer user queries about events, bookings, and payments in a helpful and concise manner.
-    Only provide information that is relevant to the user's query. If you don't know the answer, say you don't know instead of making something up.
-"""
+from django.utils import timezone
 
 ALLOWED_HISTORY_ROLES = {"user", "assistant"}
+
+def get_system_prompt():
+    now = timezone.localtime()
+
+    system_prompt = f"""
+        You are an assistant for EventOps platform. 
+        Answer user queries about events, bookings, and payments in a helpful and concise manner.
+        Only provide information that is relevant to the user's query. If you don't know the answer, say you don't know instead of making something up.
+        Current date: {now.date().isoformat()}
+        Current time: {now.strftime("%H:%M:%S")}
+        Current day: {now.strftime('%A')}
+        Timezone: {str(now.tzinfo)}
+    """
+    return system_prompt
 
 
 def normalize_history(history):
@@ -39,7 +49,7 @@ class AIAssistantService:
     def chat(self, user_prompt, history):
 
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": get_system_prompt()},
             *normalize_history(history),
             {"role": "user", "content": user_prompt},
         ]
