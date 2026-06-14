@@ -35,6 +35,7 @@ def chat_with_ai(message, history):
     )
 
     data = response.json()
+    print("DJANGO RESPONSE:", data)
     return data["response"]
 
 

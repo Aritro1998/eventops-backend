@@ -2,7 +2,6 @@ import json
 from openai import OpenAI
 from core.settings.base import OPENAI_API_KEY
 from ai_assistant.tools.registry import TOOL_REGISTRY
-from ai_assistant.tools.schemas import GET_ALL_EVENTS_TOOL
 
 from django.utils import timezone
 
@@ -54,7 +53,10 @@ class AIAssistantService:
             {"role": "user", "content": user_prompt},
         ]
 
-        tools = [GET_ALL_EVENTS_TOOL]
+        tools = [
+            tool_config["schema"]
+            for tool_config in TOOL_REGISTRY.values()
+        ]
 
         response = self.client.chat.completions.create(
             model='gpt-4o-mini',
@@ -69,30 +71,13 @@ class AIAssistantService:
             tool_call = message.tool_calls[0]
             tool_name = tool_call.function.name
             args = json.loads(tool_call.function.arguments)
-            date_filter = args.get("date_filter", None)
             
             # Find function in registry and execute
-            tool_function = TOOL_REGISTRY.get(tool_name)
+            tool_config = TOOL_REGISTRY.get(tool_name)
             # Add the tool call message to the conversation history
             messages.append(message)
 
-            if tool_function:
-                tool_result = tool_function(date_filter=date_filter)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": json.dumps(tool_result)
-                    }
-                )
-                # Get final response after tool execution
-                final_response = self.client.chat.completions.create(
-                    model='gpt-4o-mini',
-                    messages=messages,
-                    temperature=0.3
-                )
-                return final_response.choices[0].message.content
-            else:
+            if not tool_config:
                 messages.append(
                     {
                         "role": "tool",
@@ -100,8 +85,36 @@ class AIAssistantService:
                         "content": json.dumps({"error": "Tool not found"})
                     }
                 )
-                return "Sorry, I unfortunately cannot perform that action right now."
+                return (
+                    "Sorry, I unfortunately cannot "
+                    "perform that action right now."
+                )
+                
+                
+            tool_function = tool_config["function"]
+            try:
+                tool_result = tool_function(**args)
+                print("=> Tool execution result for", tool_name, ":", tool_result)
+            except Exception as e:
+                print(f"=> Error occurred while executing tool {tool_name}: {e}")
+                raise
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(tool_result)
+                }
+            )
+            # Get final response after tool execution
+            try:
+                final_response = self.client.chat.completions.create(
+                    model='gpt-4o-mini',
+                    messages=messages,
+                    temperature=0.3
+                )
+            except Exception as e:
+                print("SECOND OPENAI CALL FAILED:", str(e))
+                raise
+            return final_response.choices[0].message.content
             
         return message.content
-
-            

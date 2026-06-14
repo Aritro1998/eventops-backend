@@ -21,3 +21,24 @@ GET_ALL_EVENTS_TOOL = {
         "required": []
     }
 }
+
+
+GET_EVENT_DETAIL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_event_detail",
+        "description": (
+            "Get detailed information for a specific event."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "integer",
+                    "description": "The event id"
+                }
+            },
+            "required": ["event_id"]
+        }
+    }
+}

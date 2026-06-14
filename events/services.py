@@ -47,3 +47,9 @@ class EventService:
             available_seats=F('total_seats') - F('confirmed_bookings')
         ).order_by('start_time')
         
+    @staticmethod
+    def get_event_detail(event_id):
+        return EventService.get_events_with_available_seats().get(
+            id=event_id
+        )
+        
