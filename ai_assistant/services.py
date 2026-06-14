@@ -18,6 +18,7 @@ def get_system_prompt():
         Current time: {now.strftime("%H:%M:%S")}
         Current day: {now.strftime('%A')}
         Timezone: {str(now.tzinfo)}
+        Currency is in INR. Always show prices with the currency unit, for example: ₹500.
     """
     return system_prompt
 
@@ -46,7 +47,7 @@ class AIAssistantService:
         self.client = OpenAI(api_key=OPENAI_API_KEY)
 
     def chat(self, user_prompt, history):
-
+        
         messages = [
             {"role": "system", "content": get_system_prompt()},
             *normalize_history(history),
@@ -57,13 +58,17 @@ class AIAssistantService:
             tool_config["schema"]
             for tool_config in TOOL_REGISTRY.values()
         ]
-
-        response = self.client.chat.completions.create(
-            model='gpt-4o-mini',
-            messages=messages,
-            temperature=0.3,
-            tools=tools
-        )
+        
+        try:
+            response = self.client.chat.completions.create(
+                model='gpt-4o-mini',
+                messages=messages,
+                temperature=0.3,
+                tools=tools
+            )
+        except Exception as e:
+            print("OPENAI CALL FAILED:", str(e))
+            raise
 
         message = response.choices[0].message
 

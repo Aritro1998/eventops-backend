@@ -15,10 +15,22 @@ GET_ALL_EVENTS_TOOL = {
                         "Date in YYYY-MM-DD format. "
                         "For example: 2026-06-08"
                     )
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": (
+                        "Start date in YYYY-MM-DD format"
+                    )
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": (
+                        "End date in YYYY-MM-DD format"
+                    )
                 }
-            }
-        },
-        "required": []
+            },
+            "required": []
+        }
     }
 }
 

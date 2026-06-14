@@ -10,33 +10,51 @@ from events.models import Event
 
 
 class EventService:
+    
+    @staticmethod
+    def build_date_range_query(start_date, end_date):
+        parsed_start = parse_date(start_date)
+        parsed_end = parse_date(end_date)
+        
+        if parsed_start > parsed_end:
+            raise ValidationError({
+                "date_range": "start_date cannot be after end_date."
+            })
+
+        if parsed_start is None:
+            raise ValidationError({
+                "start_date": "Invalid date format. Use YYYY-MM-DD."
+            })
+
+        if parsed_end is None:
+            raise ValidationError({
+                "end_date": "Invalid date format. Use YYYY-MM-DD."
+            })
+            
+        # Build the selected day's boundaries in the active timezone because start_time is timezone-aware.
+        current_timezone = timezone.get_current_timezone()
+        
+        start_of_day = timezone.make_aware(
+            datetime.combine(parsed_start, time.min),
+            current_timezone
+        )
+        end_of_day = timezone.make_aware(
+            datetime.combine(parsed_end, time.max),
+            current_timezone
+        )
+            
+        return Q(start_time__range=(start_of_day, end_of_day))
 
     @staticmethod
-    def get_events_with_available_seats(date_filter=None):
+    def get_events_with_available_seats(date_filter=None, start_date=None, end_date=None):
         queryset = Event.objects.all()
 
-        if date_filter:
-            # Query params arrive as strings, so parse the expected YYYY-MM-DD format first.
-            filter_date = parse_date(date_filter)
-
-            if filter_date is None:
-                raise ValidationError({
-                    "date": "Invalid date format. Use YYYY-MM-DD."
-                })
-
-            # Build the selected day's boundaries in the active timezone because start_time is timezone-aware.
-            current_timezone = timezone.get_current_timezone()
-            start_of_day = timezone.make_aware(
-                datetime.combine(filter_date, time.min),
-                current_timezone
-            )
-            end_of_day = timezone.make_aware(
-                datetime.combine(filter_date, time.max),
-                current_timezone
-            )
-            
+        if date_filter: 
             # Keep this as a range on start_time so the database can use the start_time index.
-            queryset = queryset.filter(start_time__range=(start_of_day, end_of_day))
+            queryset = queryset.filter(EventService.build_date_range_query(date_filter, date_filter))
+            
+        elif start_date and end_date:     
+            queryset = queryset.filter(EventService.build_date_range_query(start_date, end_date))
 
         # Annotate each event with confirmed booking count and derived available seats.
         return queryset.annotate(
