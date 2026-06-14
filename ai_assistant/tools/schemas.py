@@ -27,6 +27,16 @@ GET_ALL_EVENTS_TOOL = {
                     "description": (
                         "End date in YYYY-MM-DD format"
                     )
+                },
+                "ordering": {
+                    "type": "string",
+                    "description": (
+                        "Sort order. "
+                        "Use price for cheapest events. "
+                        "Use -price for most expensive events. "
+                        "Use start_time for earliest events. "
+                        "Use -start_time for latest events."
+                    )
                 }
             },
             "required": []

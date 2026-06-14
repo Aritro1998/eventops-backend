@@ -1,12 +1,13 @@
 from events.services import EventService
 from events.serializers import EventReadSerializer
 
-def get_all_events(date_filter=None, start_date=None, end_date=None):
-    print(f"=> Executing get_all_events tool with date_filter: {date_filter}, start_date: {start_date}, end_date: {end_date}")
+def get_all_events(date_filter=None, start_date=None, end_date=None, ordering=None):
+    print(f"=> Executing get_all_events tool with date_filter: {date_filter}, start_date: {start_date}, end_date: {end_date}, ordering: {ordering}")
     events = EventService.get_events_with_available_seats(
         date_filter=date_filter,
         start_date=start_date,
-        end_date=end_date
+        end_date=end_date,
+        ordering=ordering
     )
     serializer = EventReadSerializer(events, many=True)
     return serializer.data

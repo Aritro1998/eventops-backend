@@ -11,6 +11,13 @@ from events.models import Event
 
 class EventService:
     
+    ALLOWED_ORDERINGS = {
+        "price": "price",
+        "-price": "-price",
+        "start_time": "start_time",
+        "-start_time": "-start_time",
+    }
+    
     @staticmethod
     def build_date_range_query(start_date, end_date):
         parsed_start = parse_date(start_date)
@@ -46,7 +53,7 @@ class EventService:
         return Q(start_time__range=(start_of_day, end_of_day))
 
     @staticmethod
-    def get_events_with_available_seats(date_filter=None, start_date=None, end_date=None):
+    def get_events_with_available_seats(date_filter=None, start_date=None, end_date=None, ordering=None):
         queryset = Event.objects.all()
 
         if date_filter: 
@@ -55,6 +62,15 @@ class EventService:
             
         elif start_date and end_date:     
             queryset = queryset.filter(EventService.build_date_range_query(start_date, end_date))
+            
+        if ordering:
+            if ordering not in EventService.ALLOWED_ORDERINGS:
+                raise ValidationError({
+                    "ordering": f"Invalid ordering value. Allowed values are: {', '.join(EventService.ALLOWED_ORDERINGS.keys())}"
+                })
+            queryset = queryset.order_by(EventService.ALLOWED_ORDERINGS[ordering])
+        else:
+            queryset = queryset.order_by('start_time')  # Default ordering by start_time
 
         # Annotate each event with confirmed booking count and derived available seats.
         return queryset.annotate(
@@ -63,7 +79,7 @@ class EventService:
                 0
             ),
             available_seats=F('total_seats') - F('confirmed_bookings')
-        ).order_by('start_time')
+        )
         
     @staticmethod
     def get_event_detail(event_id):
