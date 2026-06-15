@@ -8,7 +8,8 @@ class ChatView(APIView):
     def post(self, request):
         user_prompt = request.data.get('message', '').strip()
         history = request.data.get('history', [])
-
+        print("=> USER:", request.user)
+        print("=> AUTHENTICATED:", request.user.is_authenticated)
         if not user_prompt:
             return Response(
                 {'error': 'Message is required'},
