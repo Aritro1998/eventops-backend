@@ -1,3 +1,5 @@
+from bookings.models import Booking
+
 GET_ALL_EVENTS_TOOL = {
     "type": "function",
     "function": {
@@ -62,5 +64,32 @@ GET_EVENT_DETAIL_TOOL = {
             },
             "required": ["event_id"]
         }
+    }
+}
+
+
+GET_MY_BOOKINGS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_my_bookings",
+        "description": (
+            "Get bookings belonging to the currently authenticated user. "
+            "Optionally filter bookings by status."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": [choice[0] for choice in Booking.STATUS_CHOICES],
+                    "description": (
+                        "Get bookings for the currently authenticated user. "
+                        "Use this when the user asks to see their bookings, booking history, "
+                        "confirmed bookings, pending bookings, failed bookings, or cancelled bookings."
+                    )
+                }
+            }
+        },
+        "required": []
     }
 }

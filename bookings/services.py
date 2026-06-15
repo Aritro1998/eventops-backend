@@ -219,3 +219,25 @@ class BookingService:
         )
 
         return booking
+    
+    @staticmethod
+    def get_user_bookings(user, status_filter=None):
+        bookings = Booking.objects\
+                    .filter(user=user)\
+                    .select_related("event", "seat", "payment")\
+                    .order_by("-created_at")
+                    
+        if status_filter:
+            valid_statuses = [choice[0] for choice in Booking.STATUS_CHOICES]
+
+            if status_filter not in valid_statuses:
+                raise ValueError(
+                    f"Invalid status '{status_filter}'. "
+                    f"Allowed values are: {', '.join(valid_statuses)}"
+                )
+
+            bookings = bookings.filter(
+                status=status_filter
+            )
+            
+        return bookings

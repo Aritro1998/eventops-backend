@@ -8,8 +8,7 @@ class ChatView(APIView):
     def post(self, request):
         user_prompt = request.data.get('message', '').strip()
         history = request.data.get('history', [])
-        print("=> USER:", request.user)
-        print("=> AUTHENTICATED:", request.user.is_authenticated)
+       
         if not user_prompt:
             return Response(
                 {'error': 'Message is required'},
@@ -18,7 +17,11 @@ class ChatView(APIView):
         
         try:
             ai_service = AIAssistantService()
-            response = ai_service.chat(user_prompt, history)
+            response = ai_service.chat(
+                user_prompt, 
+                history, 
+                user=request.user
+            )
             return Response({'response': response})
         except Exception as e:
             return Response(

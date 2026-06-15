@@ -3,18 +3,30 @@ from ai_assistant.tools.event_tools import (
     get_event_detail,
 )
 
+from ai_assistant.tools.booking_tools import (
+    get_my_bookings
+)
+
 from ai_assistant.tools.schemas import (
     GET_ALL_EVENTS_TOOL,
     GET_EVENT_DETAIL_TOOL,
+    GET_MY_BOOKINGS_TOOL
 )
 
 TOOL_REGISTRY = {
     "get_all_events": {
+        "requires_auth": False,
         "function": get_all_events,
         "schema": GET_ALL_EVENTS_TOOL,
     },
     "get_event_detail": {
+        "requires_auth": False,
         "function": get_event_detail,
         "schema": GET_EVENT_DETAIL_TOOL,
     },
+    "get_my_bookings": {
+        "requires_auth": True,
+        "function": get_my_bookings,
+        "schema": GET_MY_BOOKINGS_TOOL,
+    }
 }

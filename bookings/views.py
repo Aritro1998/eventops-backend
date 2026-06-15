@@ -141,24 +141,20 @@ class BookingListView(APIView):
         - Pagination
         - Query optimization (select_related)
         """
-
-        bookings = Booking.objects.filter(user=request.user)
-
-        valid_statuses = [choice[0] for choice in Booking.STATUS_CHOICES]
-
-        #  Optional filtering
+        
         status_param = request.query_params.get("status")
-        if status_param:
-            if status_param not in valid_statuses:
-                return Response(
-                    {"detail": f"Invalid status filter. Valid options: {valid_statuses}"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            bookings = bookings.filter(status=status_param)
-
-        #  Avoid N+1 queries
-        bookings = bookings.select_related("event", "seat", "payment").order_by("-created_at")
-
+        
+        try:
+            bookings = BookingService.get_user_bookings(
+                user=request.user, 
+                status_filter=status_param
+            )
+        except ValueError as e:
+            return Response(
+                {"detail": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
         #  Pagination
         paginator = CustomPagination()
         paginated = paginator.paginate_queryset(bookings, request)

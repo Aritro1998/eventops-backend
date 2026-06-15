@@ -7,8 +7,13 @@ from django.utils import timezone
 
 ALLOWED_HISTORY_ROLES = {"user", "assistant"}
 
-def get_system_prompt():
+def get_system_prompt(user=None):
     now = timezone.localtime()
+    
+    if user and user.is_authenticated:
+        user_info = f"Current user is authenticated. Username: {user.username}, Email: {user.email}."
+    else:
+        user_info = "Current user is not authenticated."
 
     system_prompt = f"""
         You are an assistant for EventOps platform. 
@@ -19,6 +24,7 @@ def get_system_prompt():
         Current day: {now.strftime('%A')}
         Timezone: {str(now.tzinfo)}
         Currency is in INR. Always show prices with the currency unit, for example: ₹500.
+        {user_info}
     """
     return system_prompt
 
@@ -46,10 +52,10 @@ class AIAssistantService:
     def __init__(self):
         self.client = OpenAI(api_key=OPENAI_API_KEY)
 
-    def chat(self, user_prompt, history):
+    def chat(self, user_prompt, history, user=None):
         
         messages = [
-            {"role": "system", "content": get_system_prompt()},
+            {"role": "system", "content": get_system_prompt(user)},
             *normalize_history(history),
             {"role": "user", "content": user_prompt},
         ]
@@ -77,7 +83,7 @@ class AIAssistantService:
             tool_name = tool_call.function.name
             args = json.loads(tool_call.function.arguments)
             
-            # Find function in registry and execute
+            # Find function in registry
             tool_config = TOOL_REGISTRY.get(tool_name)
             # Add the tool call message to the conversation history
             messages.append(message)
@@ -97,8 +103,26 @@ class AIAssistantService:
                 
                 
             tool_function = tool_config["function"]
+            require_auth = tool_config.get("requires_auth", False)
+            
+            if require_auth and not user.is_authenticated:
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps({"error": "Authentication required"})
+                    }
+                )
+                return (
+                    "Please login first to use this feature."
+                )
+            
             try:
-                tool_result = tool_function(**args)
+                if require_auth:
+                    tool_result = tool_function(user=user, **args)
+                else:
+                    tool_result = tool_function(**args)
+                    
                 print("=> Tool execution result for", tool_name, ":", tool_result)
             except Exception as e:
                 print(f"=> Error occurred while executing tool {tool_name}: {e}")
