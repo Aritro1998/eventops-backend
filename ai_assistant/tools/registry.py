@@ -1,5 +1,6 @@
 from ai_assistant.tools.event_tools import (
     get_all_events,
+    get_available_seats,
     get_event_detail,
 )
 
@@ -9,6 +10,7 @@ from ai_assistant.tools.booking_tools import (
 
 from ai_assistant.tools.schemas import (
     GET_ALL_EVENTS_TOOL,
+    GET_AVAILABLE_SEATS_TOOL,
     GET_EVENT_DETAIL_TOOL,
     GET_MY_BOOKINGS_TOOL
 )
@@ -28,5 +30,10 @@ TOOL_REGISTRY = {
         "requires_auth": True,
         "function": get_my_bookings,
         "schema": GET_MY_BOOKINGS_TOOL,
-    }
+    },
+    "get_available_seats": {
+        "requires_auth": False,
+        "function": get_available_seats,
+        "schema": GET_AVAILABLE_SEATS_TOOL,
+    },
 }

@@ -6,7 +6,8 @@ from django.utils.dateparse import parse_date
 from django.db.models.functions import Coalesce
 from rest_framework.exceptions import ValidationError
 
-from events.models import Event
+from events.models import Event, Seat
+from bookings.models import Booking
 
 
 class EventService:
@@ -87,3 +88,18 @@ class EventService:
             id=event_id
         )
         
+    @staticmethod
+    def get_available_seats(event_id):
+        unavailable_seat_ids = Booking.objects.filter(
+            event_id=event_id,
+            status__in=['CONFIRMED', 'PENDING']
+        ).values_list(
+            "seat_id",
+            flat=True
+        )
+        
+        return Seat.objects.filter(
+            event_id=event_id
+        ).exclude(
+            id__in=unavailable_seat_ids
+        ).order_by('seat_number')

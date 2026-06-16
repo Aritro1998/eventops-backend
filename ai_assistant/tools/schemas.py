@@ -93,3 +93,59 @@ GET_MY_BOOKINGS_TOOL = {
         "required": []
     }
 }
+
+
+CREATE_BOOKING_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "create_booking",
+        "description": (
+            "Create a booking for the currently authenticated user. "
+            "Use when the user wants to book a ticket or reserve a seat."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "integer",
+                    "description": (
+                        "The event id."
+                    )
+                },
+                "seat_id": {
+                    "type": "integer",
+                    "description": (
+                        "The seat id to book."
+                    )
+                }
+            },
+            "required": [
+                "event_id",
+                "seat_id"
+            ]
+        }
+    }
+}
+
+
+GET_AVAILABLE_SEATS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_available_seats",
+        "description": (
+            "Get all available seats for an event."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "integer",
+                    "description": "Event id"
+                }
+            },
+            "required": ["event_id"]
+        }
+    }
+}
+
+
