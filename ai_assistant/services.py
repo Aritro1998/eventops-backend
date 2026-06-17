@@ -7,6 +7,8 @@ from django.utils import timezone
 
 ALLOWED_HISTORY_ROLES = {"user", "assistant"}
 
+MAX_TOOL_CALLS = 5
+
 def get_system_prompt(user=None):
     now = timezone.localtime()
     
@@ -19,6 +21,15 @@ def get_system_prompt(user=None):
         You are an assistant for EventOps platform. 
         Answer user queries about events, bookings, and payments in a helpful and concise manner.
         Only provide information that is relevant to the user's query. If you don't know the answer, say you don't know instead of making something up.
+        
+        When a user refers to an event by name rather than id, use the available tools to discover the event id. Do not ask the user for internal ids if they can be found using tools.
+        Always use available tools to retrieve the correct identifier before performing actions or answering questions that depend on those identifiers.
+        
+        If multiple events with similar names are found, ask the user to clarify which event they mean before proceeding.
+        
+        MANDATORY TOOL: When a user refers to an event by name, use the search_events tool to locate the event id every time.
+        Do not infer event ids from event listings, list positions, previous messages, or memory.   
+             
         Current date: {now.date().isoformat()}
         Current time: {now.strftime("%H:%M:%S")}
         Current day: {now.strftime('%A')}
@@ -76,9 +87,13 @@ class AIAssistantService:
             print("OPENAI CALL FAILED:", str(e))
             raise
 
-        message = response.choices[0].message
 
-        if message.tool_calls:
+        for _ in range(MAX_TOOL_CALLS):
+            message = response.choices[0].message
+            
+            if not message.tool_calls:
+                return message.content
+            
             tool_call = message.tool_calls[0]
             tool_name = tool_call.function.name
             args = json.loads(tool_call.function.arguments)
@@ -136,14 +151,17 @@ class AIAssistantService:
             )
             # Get final response after tool execution
             try:
-                final_response = self.client.chat.completions.create(
+                response = self.client.chat.completions.create(
                     model='gpt-4o-mini',
                     messages=messages,
-                    temperature=0.3
+                    temperature=0.3,
+                    tools=tools
                 )
             except Exception as e:
                 print("SECOND OPENAI CALL FAILED:", str(e))
                 raise
-            return final_response.choices[0].message.content
             
-        return message.content
+        return (
+            "[MAX_TOOL_CALLS_EXCEEDED] Sorry, I unfortunately I was unable to complete that request. "
+            "Please try again later."
+        )

@@ -1,4 +1,5 @@
 from datetime import datetime, time
+from rapidfuzz import process, fuzz
 
 from django.utils import timezone
 from django.db.models import Count, Q, F
@@ -103,3 +104,38 @@ class EventService:
         ).exclude(
             id__in=unavailable_seat_ids
         ).order_by('seat_number')
+
+    @staticmethod
+    def search_events_by_name(event_name):
+
+        events = list(
+            Event.objects.values(
+                "id",
+                "name"
+            )
+        )
+
+        if not events:
+            return Event.objects.none()
+
+        choices = {
+            event["name"]: event["id"]
+            for event in events
+        }
+
+        matches = process.extract(
+            event_name,
+            choices.keys(),
+            scorer=fuzz.WRatio,
+            limit=5
+        )
+
+        matching_ids = [
+            choices[name]
+            for name, score, _ in matches
+            if score >= 70
+        ]
+
+        return Event.objects.filter(
+            id__in=matching_ids
+        )

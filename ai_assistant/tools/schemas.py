@@ -148,4 +148,35 @@ GET_AVAILABLE_SEATS_TOOL = {
     }
 }
 
+SEARCH_EVENTS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_events",
+        "description": (
+            "MANDATORY TOOL. "
+            "Use this tool FIRST whenever a user mentions an event by name. "
+            "This tool converts event names into event ids. "
+            "All other event tools require a valid event id. "
+            "Never derive event ids from conversation history, list positions, "
+            "memory, assumptions, previous tool outputs, or event ordering. "
+            "Always call this tool before get_event_detail, "
+            "get_available_seats, or create_booking when the user provides an event name."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_name": {
+                    "type": "string",
+                    "description": (
+                        "The event name provided by the user."
+                    )
+                }
+            },
+            "required": [
+                "event_name"
+            ]
+        }
+    }
+}
+
 

@@ -17,6 +17,7 @@ python-dotenv==1.2.2
 python-json-logger==2.0.7
 sqlparse==0.5.5
 requests==2.32.3
+rapidfuzz==3.13.0
 
 # Development and testing
 pytest==8.2.0
