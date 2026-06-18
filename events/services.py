@@ -8,7 +8,7 @@ from django.db.models.functions import Coalesce
 from rest_framework.exceptions import ValidationError
 
 from events.models import Event, Seat
-from bookings.models import Booking
+from bookings.models import Booking, BookingSeat
 
 
 class EventService:
@@ -24,20 +24,20 @@ class EventService:
     def build_date_range_query(start_date, end_date):
         parsed_start = parse_date(start_date)
         parsed_end = parse_date(end_date)
-        
-        if parsed_start > parsed_end:
-            raise ValidationError({
-                "date_range": "start_date cannot be after end_date."
-            })
 
         if parsed_start is None:
             raise ValidationError({
-                "start_date": "Invalid date format. Use YYYY-MM-DD."
+                "date": "Invalid date format. Use YYYY-MM-DD."
             })
 
         if parsed_end is None:
             raise ValidationError({
-                "end_date": "Invalid date format. Use YYYY-MM-DD."
+                "date": "Invalid date format. Use YYYY-MM-DD."
+            })
+        
+        if parsed_start > parsed_end:
+            raise ValidationError({
+                "date_range": "start_date cannot be after end_date."
             })
             
         # Build the selected day's boundaries in the active timezone because start_time is timezone-aware.
@@ -76,11 +76,13 @@ class EventService:
 
         # Annotate each event with confirmed booking count and derived available seats.
         return queryset.annotate(
-            confirmed_bookings=Coalesce(
-                Count('bookings', filter=Q(bookings__status='CONFIRMED')),
-                0
+            confirmed_seats=Coalesce(
+                Count(
+                    'seats__booking_seats', 
+                    filter=Q(seats__booking_seats__booking__status='CONFIRMED')
+                ), 0
             ),
-            available_seats=F('total_seats') - F('confirmed_bookings')
+            available_seats=F('total_seats') - F('confirmed_seats')
         )
         
     @staticmethod
@@ -91,9 +93,9 @@ class EventService:
         
     @staticmethod
     def get_available_seats(event_id):
-        unavailable_seat_ids = Booking.objects.filter(
-            event_id=event_id,
-            status__in=['CONFIRMED', 'PENDING']
+        unavailable_seat_ids = BookingSeat.objects.filter(
+            booking__event_id=event_id,
+            booking__status__in=['CONFIRMED', 'PENDING']
         ).values_list(
             "seat_id",
             flat=True
@@ -133,9 +135,10 @@ class EventService:
         matching_ids = [
             choices[name]
             for name, score, _ in matches
-            if score >= 70
+            if score >= 80
         ]
 
         return Event.objects.filter(
             id__in=matching_ids
         )
+        

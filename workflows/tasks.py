@@ -156,7 +156,7 @@ def handle_booking_confirmation(job):
     email = job.payload.get("email")
     booking_id = job.payload.get("booking_id")
     event_name = job.payload.get("event_name", "Event")
-    seat_number = job.payload.get("seat_number", "N/A")
+    seat_numbers = job.payload.get("seat_numbers", [])
     event_time = job.payload.get("event_time", "TBD")
 
     if not email:
@@ -168,7 +168,7 @@ def handle_booking_confirmation(job):
     Your booking is confirmed.
 
     Event: {event_name}
-    Seat: {seat_number}
+    Seat: {", ".join(map(str, seat_numbers))}
     Time: {event_time}
     Booking ID: {booking_id}
     """
@@ -188,7 +188,7 @@ def handle_booking_confirmation(job):
                     </tr>
                     <tr>
                         <td style="padding: 8px; font-weight: bold;">Seat</td>
-                        <td style="padding: 8px;">{seat_number}</td>
+                        <td style="padding: 8px;">{", ".join(map(str, seat_numbers))}</td>
                     </tr>
                     <tr>
                         <td style="padding: 8px; font-weight: bold;">Time</td>
@@ -267,6 +267,6 @@ def handle_booking_expiry(job):
                 "event": "booking_expired",
                 "booking_id": booking.id,
                 "event_id": booking.event_id,
-                "seat_id": booking.seat_id,
+                "seat_ids": [bs.seat_id for bs in booking.booking_seats.all()],
             }
         )

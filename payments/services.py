@@ -16,7 +16,8 @@ class PaymentService:
     def invalidate_event_cache(event_id):
         """Invalidate caches related to the event."""
         cache.delete(f"event:{event_id}")
-        cache.delete_pattern("events:list:*")
+        if hasattr(cache, "delete_pattern"):
+            cache.delete_pattern("events:list:*")
         logger.info(
             "event_cache_invalidated",
             extra={
@@ -52,7 +53,7 @@ class PaymentService:
             now = timezone.now()
 
             # Expiry check (normalize early)
-            if booking.expires_at < now:
+            if booking.expires_at and booking.expires_at < now:
                 booking.status = "EXPIRED"
                 booking.save(update_fields=["status", "updated_at"])
                 error_message = "Booking has expired"
@@ -137,7 +138,7 @@ class PaymentService:
                     payment.status = "FAILED"
 
                     # Decide next state
-                    if booking.retry_count >= 3 or booking.expires_at < now:
+                    if booking.retry_count >= 3 or (booking.expires_at and booking.expires_at < now):
                         booking.status = "EXPIRED"
                     else:
                         booking.status = "FAILED"
@@ -156,9 +157,10 @@ class PaymentService:
                 payment.save(update_fields=["status", "transaction_id", "updated_at"])
                 booking.save(update_fields=["status", "retry_count", "updated_at"])
 
-                if event_id_to_invalidate is not None:   # ADDED
+                if event_id_to_invalidate is not None:
                     transaction.on_commit(
-                        lambda: PaymentService.invalidate_event_cache(event_id_to_invalidate)
+                        lambda event_id=event_id_to_invalidate:
+                            PaymentService.invalidate_event_cache(event_id)
                     )
                     
         if error_message:

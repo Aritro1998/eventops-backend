@@ -11,6 +11,7 @@ from rest_framework.viewsets import ModelViewSet
 from rest_framework.filters import OrderingFilter
 
 from .models import Event, Seat
+from bookings.models import BookingSeat
 from .services import EventService
 from core.permissions import IsAdminOrOrganizer
 from .serializers import EventReadSerializer, EventWriteSerializer
@@ -48,7 +49,8 @@ class EventViewSet(ModelViewSet):
         Invalidate cache for a specific event and the event list when an event is updated or deleted.
         """
         cache.delete(f"event:{event_id}")
-        cache.delete_pattern("events:list:*")
+        if hasattr(cache, "delete_pattern"):
+            cache.delete_pattern("events:list:*")
         logger.info(
             "event_cache_invalidated",
             extra={
@@ -153,10 +155,11 @@ class EventViewSet(ModelViewSet):
             new_total_seats = serializer.validated_data.get('total_seats', old_total_seats)
 
             # Get the count of currently booked seats for the event
-            max_booked_seat = event.bookings.filter(
-                status='CONFIRMED'
+            max_booked_seat = BookingSeat.objects.filter(
+                booking__event=event,
+                booking__status='CONFIRMED'
             ).aggregate(
-                max_seat_number=Max('seat__seat_number')
+                max_seat_number=Max('seat__seat_number'),
             )['max_seat_number'] or 0
 
 
@@ -207,13 +210,17 @@ class EventViewSet(ModelViewSet):
                     seat_number__gt=updated_event.total_seats
                 )
 
-                active_bookings_exist = event.bookings.filter(
-                    seat__in=seats_above_limit
+                active_bookings_exist = BookingSeat.objects.filter(
+                    seat__in=seats_above_limit,
+                    booking__event=event,
                 ).filter(
-                    Q(status='CONFIRMED') |
-                    Q(status__in=['PENDING', 'FAILED'], expires_at__gt=timezone.now())
+                    Q(booking__status='CONFIRMED') | 
+                    Q(
+                        booking__status__in=['PENDING', 'FAILED'],
+                        booking__expires_at__gt=timezone.now()
+                    )  
                 ).exists()
-
+                
                 if active_bookings_exist:
                     logger.warning(
                         "event_active_booking_reduction_blocked",
@@ -229,8 +236,13 @@ class EventViewSet(ModelViewSet):
 
                 # Shrinking is only safe after we prove those higher-numbered seats are not
                 # still referenced by active bookings.
+                confirmed_seat_ids = BookingSeat.objects.filter(
+                    booking__event=event,
+                    booking__status='CONFIRMED'                                                                                                                                                                                                                                                                                                                                                                                    
+                ).values_list('seat_id', flat=True)
+                
                 seats_to_remove = seats_above_limit.exclude(
-                    id__in=event.bookings.filter(status='CONFIRMED').values_list('seat_id', flat=True)
+                    id__in=confirmed_seat_ids
                 )
                 # Remove the unbooked seats that are above the new total_seats
                 seats_to_remove.delete()

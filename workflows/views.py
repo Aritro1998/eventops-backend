@@ -1,6 +1,6 @@
 import logging
 
-from datetime import timedelta
+from datetime import UTC, datetime, time, timedelta
 
 from rest_framework import status
 from django.shortcuts import get_object_or_404
@@ -18,6 +18,12 @@ from workflows.tasks import process_workflow_job
 from workflows.serializers import WorkflowJobSerializer
 
 logger = logging.getLogger(__name__)
+
+
+def utc_day_bounds(date_value):
+    start = datetime.combine(date_value, time.min, tzinfo=UTC)
+    end = datetime.combine(date_value, time.max, tzinfo=UTC)
+    return start, end
 
 
 class WorkflowJobListView(ListAPIView):
@@ -44,7 +50,8 @@ class WorkflowJobListView(ListAPIView):
             jobs = jobs.filter(status=status_param)
 
         if created_date:
-            jobs = jobs.filter(created_at__date=created_date)
+            start, end = utc_day_bounds(created_date)
+            jobs = jobs.filter(created_at__range=(start, end))
 
         return jobs
 
@@ -92,7 +99,8 @@ class FailedJobsView(ListAPIView):
             jobs = jobs.filter(job_type=job_type)
 
         if created_date:
-            jobs = jobs.filter(created_at__date=created_date)
+            start, end = utc_day_bounds(created_date)
+            jobs = jobs.filter(created_at__range=(start, end))
 
         return jobs
     

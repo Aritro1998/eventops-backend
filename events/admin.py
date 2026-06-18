@@ -13,4 +13,5 @@ class EventAdmin(admin.ModelAdmin):
 class SeatAdmin(admin.ModelAdmin):
     list_display = ["id", "event", "seat_number"]
     list_filter = ["event"]
+    search_fields = ["seat_number", "event__name"]
     list_display_links = ["id", "event"]

@@ -18,7 +18,6 @@ class Booking(models.Model):
 
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="bookings")
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="bookings")
-    seat = models.ForeignKey(Seat, on_delete=models.CASCADE, related_name="bookings")
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,
@@ -33,7 +32,7 @@ class Booking(models.Model):
     retry_count = models.IntegerField(default=0)
 
     def __str__(self):
-        return f"Booking {self.id} (Seat {self.seat_id}, User {self.user_id})"
+        return f"Booking {self.id} (Event {self.event_id}, User {self.user_id}) - {self.status}"
     
     class Meta:
         ordering = ['-created_at']
@@ -42,11 +41,6 @@ class Booking(models.Model):
             models.UniqueConstraint(
                 fields=['idempotency_key', 'user'],
                 name='unique_idempotency_key_per_user'
-            ),
-            models.UniqueConstraint(
-                fields=['seat'],
-                condition=Q(status='CONFIRMED'),
-                name='unique_confirmed_seat_booking'
             ),
             models.CheckConstraint(
                 condition=Q(retry_count__gte=0),
@@ -57,7 +51,28 @@ class Booking(models.Model):
         indexes = [
             models.Index(fields=['user']),
             models.Index(fields=['event']),
-            models.Index(fields=['seat']),
             models.Index(fields=['status']),
             models.Index(fields=['expires_at']),
+        ]
+        
+
+class BookingSeat(models.Model):
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="booking_seats")
+    seat = models.ForeignKey(Seat, on_delete=models.PROTECT, related_name="booking_seats")
+    
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['booking', 'seat'],
+                name='unique_seat_per_booking'
+            ),
+            models.UniqueConstraint(
+                fields=['seat'],
+                name='unique_seat_claim'
+            )
+        ]
+        
+        indexes = [
+            models.Index(fields=['booking']),
+            models.Index(fields=['seat']),
         ]

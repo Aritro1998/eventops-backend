@@ -1,6 +1,6 @@
 {
   "info": {
-    "_postman_id": "536a6d31-62f5-4b65-b3af-23fdb5780d33",
+    "_postman_id": "529ab92a-5d48-4065-99be-0b3bce7b1d55",
     "name": "EventOps",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "_exporter_id": "26223795"
@@ -147,7 +147,7 @@
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Music Fest\",\n  \"description\": \"Concert by Coldplay\",\n  \"start_time\": \"2026-05-10T10:00:00Z\",\n  \"end_time\": \"2026-05-10T17:00:00Z\",\n  \"total_seats\": 300,\n  \"price\": 700.00\n}",
+              "raw": "{\n  \"name\": \"Night Life\",\n  \"description\": \"Concert by Arijit Singh\",\n  \"start_time\": \"2026-05-12T22:00:00Z\",\n  \"end_time\": \"2026-05-13T02:00:00Z\",\n  \"total_seats\": 500,\n  \"price\": 1500.00\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -779,6 +779,35 @@
           "response": []
         }
       ]
+    },
+    {
+      "name": "AI_Assistant",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"message\": \"Hello\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{base_url}}/api/ai-assistant/chat/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "ai-assistant",
+            "chat",
+            ""
+          ]
+        }
+      },
+      "response": []
     }
   ],
   "event": [

@@ -55,7 +55,7 @@ def booking_status_change_handler(sender, instance, created, **kwargs):
                 "email": instance.user.email,
                 "booking_id": instance.id,
                 "event_name": instance.event.name,
-                "seat_number": instance.seat.seat_number,
+                "seat_numbers": [booking_seat.seat.seat_number for booking_seat in instance.booking_seats.all()],
                 "event_time": str(instance.event.start_time),
             }
         )

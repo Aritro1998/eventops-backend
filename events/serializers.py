@@ -28,7 +28,7 @@ class EventReadSerializer(serializers.ModelSerializer):
         ]
 
 
-class EventSummerySerializer(serializers.ModelSerializer):
+class EventSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = Event
         fields = [
@@ -40,7 +40,7 @@ class EventSummerySerializer(serializers.ModelSerializer):
         ]
 
 
-class SeatSummerySerializer(serializers.ModelSerializer):
+class SeatSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = Seat
         fields = [

@@ -5,6 +5,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
+from django.db import OperationalError
 
 from .models import Booking
 from .services import BookingService
@@ -51,85 +52,44 @@ class BookingListView(APIView):
         4. Trigger payment workflow
         5. Return final booking state
         """
-
+        
         user = request.user
-        key = request.data.get("idempotency_key")
-
-        def respond_existing(booking):
-            return Response(
-                BookingReadSerializer(booking).data,
-                status=status.HTTP_200_OK
+        
+        try:
+            # Validate request data
+            serializer = BookingWriteSerializer(
+                data=request.data,
+                context={"request": request}
             )
+            serializer.is_valid(raise_exception=True)
 
-        # 1. Fast idempotency check (no locking)
-        if key:
-            existing = BookingService.get_existing_booking(user, key)
-            if existing:
-                logger.info(
-                    "booking_idempotency_hit",
-                    extra={
-                        "event": "booking_idempotency_hit",
-                        "user_id": user.id,
-                        "booking_id": existing.id,
-                    }
-                )
-                return respond_existing(existing)
-
-        # 2. Validate request data
-        serializer = BookingWriteSerializer(
-            data=request.data,
-            context={"request": request}
-        )
-        serializer.is_valid(raise_exception=True)
-
-        # 3. Delegate to service layer
-        booking, seat_unavailable, is_existing = BookingService.create_booking(
-            user=user,
-            validated_data=serializer.validated_data,
-            key=key
-        )
-
-        # Handle seat conflict
-        if seat_unavailable:
+            booking, is_existing = BookingService.create_booking_for_user(
+                user=request.user,
+                event=serializer.validated_data["event"],
+                seat_ids=[seat.id for seat in serializer.validated_data["seats"]],
+                idempotency_key=request.data.get("idempotency_key")
+            )
+        except OperationalError:
             logger.warning(
-                "booking_seat_unavailable",
+                "booking_create_database_contention",
                 extra={
-                    "event": "booking_seat_unavailable",
+                    "event": "booking_create_database_contention",
                     "user_id": user.id,
-                    "event_id": serializer.validated_data["event"].id,
-                    "seat_id": serializer.validated_data["seat"].id,
                 }
             )
             return Response(
-                {"detail": "Seat already booked"},
+                {"detail": "Booking could not be completed right now. Please retry."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        except ValueError as e:
+            return Response(
+                {"detail": str(e)},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Idempotent retry
-        if is_existing:
-            logger.info(
-                "booking_idempotency_recovered",
-                extra={
-                    "event": "booking_idempotency_recovered",
-                    "user_id": user.id,
-                    "booking_id": booking.id,
-                }
-            )
-            return respond_existing(booking)
-
-        # 4. Trigger payment workflow (outside transaction)
-        if booking.status == "PENDING":
-            PaymentService.process_payment(booking.id)
-
-        # Fetch optimized object (avoids N+1)
-        booking = Booking.objects.select_related(
-            "event", "seat", "payment"
-        ).get(id=booking.id)
-
-        # 5. Return response
         return Response(
             BookingReadSerializer(booking).data,
-            status=status.HTTP_201_CREATED
+            status=status.HTTP_200_OK if is_existing else status.HTTP_201_CREATED
         )
 
     def get(self, request):
@@ -176,7 +136,9 @@ class BookingDetailView(APIView):
 
     def get(self, request, booking_id):
         booking = get_object_or_404(
-            Booking.objects.select_related("event", "seat", "payment"),
+            Booking.objects\
+            .select_related("event", "payment")\
+            .prefetch_related("booking_seats__seat"),
             id=booking_id,
             user=request.user
         )
@@ -199,7 +161,9 @@ class BookingCancelView(APIView):
     def post(self, request, booking_id):
 
         booking = get_object_or_404(
-            Booking.objects.select_related("event", "seat", "payment"),
+            Booking.objects\
+            .select_related("event", "payment")\
+            .prefetch_related("booking_seats__seat"),
             id=booking_id,
             user=request.user
         )
@@ -241,7 +205,9 @@ class BookingRetryPaymentView(APIView):
     def post(self, request, booking_id):
 
         booking = get_object_or_404(
-            Booking.objects.select_related("event", "seat", "payment"),
+            Booking.objects\
+            .select_related("event", "payment")\
+            .prefetch_related("booking_seats__seat"),
             id=booking_id,
             user=request.user
         )
