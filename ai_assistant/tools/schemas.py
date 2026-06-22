@@ -95,39 +95,6 @@ GET_MY_BOOKINGS_TOOL = {
 }
 
 
-CREATE_BOOKING_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "create_booking",
-        "description": (
-            "Create a booking for the currently authenticated user. "
-            "Use when the user wants to book a ticket or reserve a seat."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "event_id": {
-                    "type": "integer",
-                    "description": (
-                        "The event id."
-                    )
-                },
-                "seat_id": {
-                    "type": "integer",
-                    "description": (
-                        "The seat id to book."
-                    )
-                }
-            },
-            "required": [
-                "event_id",
-                "seat_id"
-            ]
-        }
-    }
-}
-
-
 GET_AVAILABLE_SEATS_TOOL = {
     "type": "function",
     "function": {
@@ -147,6 +114,7 @@ GET_AVAILABLE_SEATS_TOOL = {
         }
     }
 }
+
 
 SEARCH_EVENTS_TOOL = {
     "type": "function",
@@ -174,6 +142,56 @@ SEARCH_EVENTS_TOOL = {
             },
             "required": [
                 "event_name"
+            ]
+        }
+    }
+}
+
+
+CREATE_BOOKING_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "create_booking",
+        "description": (
+            "Finalize the existing pending booking after explicit user confirmation. "
+            "Only call this when a pending booking exists and the user clearly confirms. "
+            "Never call this when the user is changing seats, changing event, cancelling event or asking a question."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        }
+    }
+}
+
+
+PREPARE_BOOKING_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "prepare_booking",
+        "description": (
+            "Prepare or replace a pending booking before final confirmation. "
+            "Call this when the user chooses seats for a new booking, or when an existing "
+            "pending booking exists and the user asks to change the seats. "
+            "After this tool succeeds, summarize the updated pending booking and ask for confirmation. "
+            "Do not call this for affirmative confirmations like yes, confirm, proceed, or book it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "integer"
+                },
+                "seat_numbers": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                }
+            },
+            "required": [
+                "event_id",
+                "seat_numbers"
             ]
         }
     }

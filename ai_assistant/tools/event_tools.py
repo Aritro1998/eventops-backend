@@ -20,11 +20,12 @@ def get_event_detail(event_id):
     return serializer.data
 
 
-def get_available_seats(event_id):
+def get_available_seats(request, event_id):
     print("=> Executing get_available_seats tool with event_id:", event_id)
     available_seats = EventService.get_available_seats(event_id)
     serializer = SeatSummarySerializer(available_seats, many=True)
     return serializer.data
+
 
 def search_events(event_name):
     print("=> Executing search_events tool with event_name:", event_name)

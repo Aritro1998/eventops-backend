@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     "bookings",
     "workflows",
     "payments",
+    "ai_assistant",
 ]
 
 MIDDLEWARE = [

@@ -20,7 +20,8 @@ class ChatView(APIView):
             response = ai_service.chat(
                 user_prompt, 
                 history, 
-                user=request.user
+                user=request.user,
+                request=request
             )
             return Response({'response': response})
         except Exception as e:

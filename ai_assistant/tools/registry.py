@@ -6,15 +6,19 @@ from ai_assistant.tools.event_tools import (
 )
 
 from ai_assistant.tools.booking_tools import (
-    get_my_bookings
+    create_booking,
+    get_my_bookings,
+    prepare_booking,
 )
 
 from ai_assistant.tools.schemas import (
+    CREATE_BOOKING_TOOL,
     GET_ALL_EVENTS_TOOL,
     GET_AVAILABLE_SEATS_TOOL,
     GET_EVENT_DETAIL_TOOL,
     GET_MY_BOOKINGS_TOOL,
-    SEARCH_EVENTS_TOOL
+    SEARCH_EVENTS_TOOL,
+    PREPARE_BOOKING_TOOL,
 )
 
 TOOL_REGISTRY = {
@@ -35,12 +39,25 @@ TOOL_REGISTRY = {
     },
     "get_available_seats": {
         "requires_auth": False,
+        "requires_request": True,
         "function": get_available_seats,
         "schema": GET_AVAILABLE_SEATS_TOOL,
     },
     "search_events": {
-    "function": search_events,
-    "schema": SEARCH_EVENTS_TOOL,
-    "requires_auth": False,
-},
+        "requires_auth": False,
+        "function": search_events,
+        "schema": SEARCH_EVENTS_TOOL,
+    },
+    "create_booking": {
+        "requires_auth": True,
+        "requires_request": True,
+        "function": create_booking,
+        "schema": CREATE_BOOKING_TOOL,
+    },
+    "prepare_booking": {
+        "requires_auth": True,
+        "requires_request": True,
+        "function": prepare_booking,
+        "schema": PREPARE_BOOKING_TOOL,
+    },
 }
