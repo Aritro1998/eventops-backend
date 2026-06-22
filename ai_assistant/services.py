@@ -49,8 +49,12 @@ def get_system_prompt(user=None, request=None):
             If the user wants a different event:
                 call search_events to search for the event id using the event name and call prepare_booking again.
                 
-            If the user doesn't want to proceed with the booking with No, Never mind etc:
-                call cancel_pending_booking immediately
+            If there is a pending booking and the user clearly cancels or rejects it
+            with messages like "no", "cancel", "never mind", "stop", "don't book it", or "forget it":
+                you MUST call cancel_pending_booking in the same response.
+                Do not call create_booking.
+                Do not call prepare_booking.
+                Do not say the booking was cancelled unless the tool call has already been made.
             
             Pending booking details:
             - Event ID: {pending_booking.event.id}

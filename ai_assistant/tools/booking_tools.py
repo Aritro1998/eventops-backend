@@ -7,6 +7,7 @@ from bookings.services import BookingService
 from bookings.serializers import BookingReadSerializer
 from ai_assistant.models import PendingBooking
 
+
 def get_my_bookings(user, status=None):
     print("=> Executing get_my_bookings tool with status:", status)
     bookings = BookingService.get_user_bookings(user, status_filter=status)
@@ -91,6 +92,34 @@ def prepare_booking(user, request, event_id, seat_numbers):
             event.price * len(seat_numbers)
         ),
     }
+    
+    
+def cancel_pending_booking(user, request):
+    print("=> Executing cancel_pending_booking tool")
+    
+    pending_booking = PendingBooking.objects.filter(user=user).first()
+    
+    if not pending_booking:
+        return {
+            "status": "no_pending_booking",
+            "message": "No pending booking found."
+        }
+        
+    event_name = pending_booking.event.name
+    seat_numbers = pending_booking.seat_numbers
+    amount = pending_booking.amount
+    
+    pending_booking.delete()
+    
+    return {
+        "status": "cancelled",
+        "event_name": event_name,
+        "seat_numbers": seat_numbers,
+        "amount": str(amount),
+    }
+    
+
+
     
         
     

@@ -198,3 +198,20 @@ PREPARE_BOOKING_TOOL = {
 }
 
 
+CANCEL_PENDING_BOOKING_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "cancel_pending_booking",
+        "description": (
+            "Cancel and delete the existing pending booking before it is confirmed. "
+            "Call this only when a pending booking exists and the user clearly says "
+            "they do not want to proceed, such as no, cancel, never mind, stop, or don't book it. "
+            "Do not call this for confirmed bookings."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        }
+    }
+}
+

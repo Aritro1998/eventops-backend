@@ -9,6 +9,7 @@ from ai_assistant.tools.booking_tools import (
     create_booking,
     get_my_bookings,
     prepare_booking,
+    cancel_pending_booking
 )
 
 from ai_assistant.tools.schemas import (
@@ -19,6 +20,7 @@ from ai_assistant.tools.schemas import (
     GET_MY_BOOKINGS_TOOL,
     SEARCH_EVENTS_TOOL,
     PREPARE_BOOKING_TOOL,
+    CANCEL_PENDING_BOOKING_TOOL
 )
 
 TOOL_REGISTRY = {
@@ -59,5 +61,11 @@ TOOL_REGISTRY = {
         "requires_request": True,
         "function": prepare_booking,
         "schema": PREPARE_BOOKING_TOOL,
+    },
+    "cancel_pending_booking": {
+        "requires_auth": True,
+        "requires_request": True,
+        "function": cancel_pending_booking,
+        "schema": CANCEL_PENDING_BOOKING_TOOL,
     },
 }
