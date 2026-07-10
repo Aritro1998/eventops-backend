@@ -146,7 +146,8 @@ class EventViewSet(ModelViewSet):
     def perform_update(self, serializer):
         # We lock the event row so seat-count changes and seat table updates happen together.
         with transaction.atomic():
-            event = Event.objects.select_for_update().get(id=self.get_object().id)
+            event = Event.objects.select_for_update().get(pk=serializer.instance.pk)
+            serializer.instance = event
 
             # Get current total_seats before update
             old_total_seats = event.total_seats
@@ -178,7 +179,7 @@ class EventViewSet(ModelViewSet):
                 raise serializers.ValidationError(
                     f"Cannot reduce total seats below the highest booked seat number ({max_booked_seat})"
                 )
-            elif new_total_seats == old_total_seats:
+            if new_total_seats == old_total_seats:
                 # If total_seats is unchanged, we can simply save the event without modifying seats
                 updated_event = serializer.save()
                 logger.info(
@@ -238,7 +239,7 @@ class EventViewSet(ModelViewSet):
                 # still referenced by active bookings.
                 confirmed_seat_ids = BookingSeat.objects.filter(
                     booking__event=event,
-                    booking__status='CONFIRMED'                                                                                                                                                                                                                                                                                                                                                                                    
+                    booking__status='CONFIRMED'
                 ).values_list('seat_id', flat=True)
                 
                 seats_to_remove = seats_above_limit.exclude(

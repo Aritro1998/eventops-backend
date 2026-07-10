@@ -155,7 +155,7 @@ CREATE_BOOKING_TOOL = {
         "description": (
             "Finalize the existing pending booking after explicit user confirmation. "
             "Only call this when a pending booking exists and the user clearly confirms. "
-            "Never call this when the user is changing seats, changing event, cancelling event or asking a question."
+            "Never call this when the user is changing seats, changing event, cancelling the pending booking or asking a question."
         ),
         "parameters": {
             "type": "object",

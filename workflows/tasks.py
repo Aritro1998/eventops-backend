@@ -143,6 +143,29 @@ def requeue_pending_jobs_task():
     requeue_pending_jobs()
 
 
+@shared_task
+def cleanup_expired_pending_bookings_task():
+    """
+    Delete expired AI assistant pending booking drafts.
+    These are not real bookings and do not reserve seats.
+    """
+    from ai_assistant.models import PendingBooking
+    
+    deleted_count, _ = PendingBooking.objects.filter(
+        expires_at__lte=timezone.now()
+    ).delete()
+    
+    logger.info(
+        "expired_pending_bookings_cleaned",
+        extra={
+            "event": "expired_pending_bookings_cleaned",
+            "deleted_count": deleted_count,
+        }
+    )
+    
+    return deleted_count
+
+
 def handle_booking_confirmation(job):
     """
     Handle email sending for booking confirmation.

@@ -1,11 +1,9 @@
 import uuid
 
-from datetime import datetime, timedelta
-from django.utils import timezone
 from events.models import Event, Seat
 from bookings.services import BookingService
 from bookings.serializers import BookingReadSerializer
-from ai_assistant.models import PendingBooking
+from ai_assistant.models import PendingBooking, get_pending_booking_expiry
 
 
 def get_my_bookings(user, status=None):
@@ -25,10 +23,8 @@ def create_booking(user, request):
         )
     
     # Check if the pending booking has expired
-    current_time = timezone.now()
-    pending_time = pending_booking.created_at
-    
-    if current_time - pending_time > timedelta(minutes=BookingService.EXPIRY_MINUTES):
+    if pending_booking.is_expired:
+        pending_booking.delete()  # Delete the expired pending booking
         raise ValueError(
             f"Pending booking has expired. Please start over."
         )
@@ -80,6 +76,7 @@ def prepare_booking(user, request, event_id, seat_numbers):
             "event": event,
             "seat_numbers": seat_numbers,
             "amount": event.price * len(seat_numbers),
+            "expires_at": get_pending_booking_expiry(),
         }
    )
     

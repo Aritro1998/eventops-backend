@@ -20,6 +20,9 @@ def get_system_prompt(user=None, request=None):
         
     if user and user.is_authenticated:
         pending_booking = PendingBooking.objects.filter(user=user).first()
+        if pending_booking and pending_booking.is_expired:
+            pending_booking.delete()  # Delete the expired pending booking
+            pending_booking = None
     else:
         pending_booking = None
     

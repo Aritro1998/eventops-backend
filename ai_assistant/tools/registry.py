@@ -9,7 +9,7 @@ from ai_assistant.tools.booking_tools import (
     create_booking,
     get_my_bookings,
     prepare_booking,
-    cancel_pending_booking
+    cancel_pending_booking,
 )
 
 from ai_assistant.tools.schemas import (

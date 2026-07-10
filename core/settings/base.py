@@ -107,6 +107,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "workflows.tasks.requeue_pending_jobs_task",
         "schedule": crontab(minute="*/5"),
     },
+    "cleanup-expired-pending-bookings": {
+        "task": "workflows.tasks.cleanup_expired_pending_bookings_task",
+        "schedule": crontab(minute="*/5"),
+    },
 }
 
 LOGGING = {
