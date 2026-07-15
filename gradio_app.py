@@ -2,6 +2,8 @@ import gradio as gr
 import requests
 
 DJANGO_API_URL = "http://web:8000/api/ai-assistant/chat/"
+DJANGO_LOGIN_URL = "http://web:8000/api/auth/token/"
+DJANGO_REGISTER_URL = "http://web:8000//api/auth/register/"
 
 
 def convert_history(history):
@@ -21,6 +23,19 @@ def convert_history(history):
             })
 
     return messages
+
+
+def format_error(data):
+    if isinstance(data, dict):
+        parts = []
+        for field, messages in data.items():
+            if isinstance(messages, list):
+                parts.append(f"{field}: {', '.join(map(str, messages))}")
+            else:
+                parts.append(f"{field}: {messages}")
+        return "; ".join(parts)
+
+    return str(data)
 
 
 def chat_with_ai(message, history, token):
@@ -45,9 +60,43 @@ def chat_with_ai(message, history, token):
     return data.get("response", data.get("error", "Unknown error"))
 
 
+def register(username, email, password):
+    if not username or not email or not password:
+        return (
+            None,
+            "Please enter username, email, and password.",
+            gr.update(visible=True),
+            gr.update(visible=False),
+        )
+
+    response = requests.post(
+        DJANGO_REGISTER_URL,
+        json={
+            "username": username,
+            "email": email,
+            "password": password,
+        }
+    )
+
+    if response.status_code != 201:
+        try:
+            data = response.json()
+        except Exception:
+            data = {}
+
+        return (
+            None,
+            f"Registration failed: {format_error(data)}",
+            gr.update(visible=True),
+            gr.update(visible=False),
+        )
+
+    return login(username, password)
+
+
 def login(username, password):
     response = requests.post(
-        "http://web:8000/api/auth/token/",
+        DJANGO_LOGIN_URL,
         json={"username": username, "password": password}
     )
 
@@ -86,8 +135,6 @@ def logout():
     )
 
 
-
-
 with gr.Blocks(
     title="EventOps AI Assistant",
     theme=gr.themes.Soft(),
@@ -112,6 +159,8 @@ with gr.Blocks(
             logged_in_actions = gr.Column(visible=False)
 
             with gr.Accordion("Login / Register", open=False) as login_section:
+                email = gr.Textbox(label="Email", placeholder="Only for registration")
+                
                 username = gr.Textbox(label="Username")
 
                 password = gr.Textbox(
@@ -187,8 +236,14 @@ with gr.Blocks(
     )
 
     register_btn.click(
-        fn=lambda: "Registration will be added in a later milestone. Please use an existing account for now.",
-        outputs=login_status
+        fn=register,
+        inputs=[username, email, password],
+        outputs=[
+            token_state,
+            login_status,
+            login_section,
+            logged_in_actions,
+        ]
     )
 
     def chat_wrapper(message, history, token):
