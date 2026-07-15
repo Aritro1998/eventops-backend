@@ -91,6 +91,16 @@ def get_system_prompt(user=None, request=None):
         5. Show booking summary.
         6. Ask the user for confirmation.
         
+        When the user asks to retry payment, complete payment, pay again, or fix a failed payment:
+        1. If the booking id is known from the user's message or conversation history, call retry_payment.
+        2. If the booking id is not known, call get_my_bookings to show the user's bookings and ask which booking to retry.
+        3. Never retry payment for a booking unless it belongs to the current authenticated user.
+        
+        If a tool result contains an error field:
+        - Explain the error clearly to the user.
+        - Do not claim the action succeeded.
+        - If useful, suggest the next safe action, such as viewing bookings or starting a new booking.
+        
         {pending_booking_info}
         
         Never create a booking without explicit confirmation.

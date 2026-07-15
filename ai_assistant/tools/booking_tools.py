@@ -1,7 +1,9 @@
 import uuid
 
+from bookings.models import Booking
 from events.models import Event, Seat
 from bookings.services import BookingService
+from payments.services import PaymentService
 from bookings.serializers import BookingReadSerializer
 from ai_assistant.models import PendingBooking, get_pending_booking_expiry
 
@@ -115,8 +117,30 @@ def cancel_pending_booking(user, request):
         "amount": str(amount),
     }
     
-
-
     
-        
+def retry_payment(user, request, booking_id):
+    print("=> Executing retry_payment tool with booking_id:", booking_id)
     
+    # Fetch the booking with the given booking_id and ensure it belongs to the user
+    booking = (
+        Booking.objects
+        .select_related("event", "payment")
+        .prefetch_related("booking_seats__seat")
+        .filter(id=booking_id, user=user)
+        .first()
+    )
+    
+    if not booking:
+        raise ValueError("Booking not found.")
+    
+    if booking.status not in ["FAILED", "PENDING"]:
+        raise ValueError("Payment cannot be retried for this booking status.")
+    
+    # Retry the payment using the PaymentService
+    PaymentService.process_payment(booking.id)
+    # Refresh the booking instance to get the updated status and payment details
+    booking.refresh_from_db()
+    serializer = BookingReadSerializer(booking)
+    
+    return serializer.data
+

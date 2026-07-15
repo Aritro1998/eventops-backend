@@ -215,3 +215,28 @@ CANCEL_PENDING_BOOKING_TOOL = {
     }
 }
 
+
+RETRY_PAYMENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "retry_payment",
+        "description": (
+            "Retry payment for one of the current user's existing bookings. "
+            "Use this when the user asks to retry payment, pay again, complete payment, "
+            "or fix a failed/pending payment. "
+            "Requires the booking id. If the user does not provide a booking id, "
+            "call get_my_bookings first or ask which booking they mean."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "booking_id": {
+                    "type": "integer",
+                    "description": "The user's booking id to retry payment for."
+                }
+            },
+            "required": ["booking_id"]
+        }
+    }
+}
+

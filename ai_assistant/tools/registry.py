@@ -10,6 +10,7 @@ from ai_assistant.tools.booking_tools import (
     get_my_bookings,
     prepare_booking,
     cancel_pending_booking,
+    retry_payment,
 )
 
 from ai_assistant.tools.schemas import (
@@ -20,7 +21,8 @@ from ai_assistant.tools.schemas import (
     GET_MY_BOOKINGS_TOOL,
     SEARCH_EVENTS_TOOL,
     PREPARE_BOOKING_TOOL,
-    CANCEL_PENDING_BOOKING_TOOL
+    CANCEL_PENDING_BOOKING_TOOL,
+    RETRY_PAYMENT_TOOL,
 )
 
 TOOL_REGISTRY = {
@@ -67,5 +69,11 @@ TOOL_REGISTRY = {
         "requires_request": True,
         "function": cancel_pending_booking,
         "schema": CANCEL_PENDING_BOOKING_TOOL,
+    },
+    "retry_payment": {
+        "requires_auth": True,
+        "requires_request": True,
+        "function": retry_payment,
+        "schema": RETRY_PAYMENT_TOOL,
     },
 }
