@@ -5,26 +5,6 @@ DJANGO_API_URL = "http://web:8000/api/ai-assistant/chat/"
 DJANGO_LOGIN_URL = "http://web:8000/api/auth/token/"
 DJANGO_REGISTER_URL = "http://web:8000//api/auth/register/"
 
-
-def convert_history(history):
-    messages = []
-
-    for item in history or []:
-        if not isinstance(item, dict):
-            continue
-
-        role = item.get("role")
-        content = item.get("content")
-
-        if role in {"user", "assistant"} and isinstance(content, str) and content:
-            messages.append({
-                "role": role,
-                "content": content
-            })
-
-    return messages
-
-
 def format_error(data):
     if isinstance(data, dict):
         parts = []
@@ -38,26 +18,32 @@ def format_error(data):
     return str(data)
 
 
-def chat_with_ai(message, history, token):
-    converted_history = convert_history(history)
-
+def chat_with_ai(message, token, conversation_id):
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    response = requests.post(
-        DJANGO_API_URL,
-        json={
-            "message": message,
-            "history": converted_history
-        },
-        headers=headers
+    payload = {"message": message}
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
+
+    try:
+        response = requests.post(
+            DJANGO_API_URL,
+            json=payload,
+            headers=headers,
+            timeout=60,
+        )
+        data = response.json()
+    except requests.RequestException:
+        return "The chat service is unavailable. Please try again.", conversation_id
+    except ValueError:
+        return "The chat service returned an invalid response.", conversation_id
+
+    return (
+        data.get("response", data.get("error", "Unknown error")),
+        data.get("conversation_id", conversation_id),
     )
-
-    data = response.json()
-    print("DJANGO RESPONSE:", data)
-
-    return data.get("response", data.get("error", "Unknown error"))
 
 
 def register(username, email, password):
@@ -129,9 +115,16 @@ def logout():
 <div style='text-align:center; font-size:32px; font-weight:600;'>
 🔓 Guest User
 </div>
-""",
+        """,
         gr.update(visible=True),
-        gr.update(visible=False)
+        gr.update(visible=False),
+        None,
+        [
+            {
+                "role": "assistant",
+                "content": "Hi! I can help you discover events, compare prices, and later manage bookings.",
+            }
+        ],
     )
 
 
@@ -141,6 +134,7 @@ with gr.Blocks(
 ) as demo:
 
     token_state = gr.State(None)
+    conversation_id_state = gr.State(None)
 
     with gr.Row(equal_height=False):
 
@@ -160,7 +154,7 @@ with gr.Blocks(
 
             with gr.Accordion("Login / Register", open=False) as login_section:
                 email = gr.Textbox(label="Email", placeholder="Only for registration")
-                
+
                 username = gr.Textbox(label="Username")
 
                 password = gr.Textbox(
@@ -232,6 +226,8 @@ with gr.Blocks(
             login_status,
             login_section,
             logged_in_actions,
+            conversation_id_state,
+            chatbot,
         ]
     )
 
@@ -246,26 +242,30 @@ with gr.Blocks(
         ]
     )
 
-    def chat_wrapper(message, history, token):
-        response = chat_with_ai(message, history, token)
+    def chat_wrapper(message, history, token, conversation_id):
+        response, conversation_id = chat_with_ai(
+            message,
+            token,
+            conversation_id,
+        )
 
         history = history + [
             {"role": "user", "content": message},
-            {"role": "assistant", "content": response}
+            {"role": "assistant", "content": response},
         ]
 
-        return history, ""
+        return history, "", conversation_id
 
     send_btn.click(
         fn=chat_wrapper,
-        inputs=[msg, chatbot, token_state],
-        outputs=[chatbot, msg]
+        inputs=[msg, chatbot, token_state, conversation_id_state],
+        outputs=[chatbot, msg, conversation_id_state]
     )
 
     msg.submit(
         fn=chat_wrapper,
-        inputs=[msg, chatbot, token_state],
-        outputs=[chatbot, msg]
+        inputs=[msg, chatbot, token_state, conversation_id_state],
+        outputs=[chatbot, msg, conversation_id_state]
     )
 
     def set_prompt(text):

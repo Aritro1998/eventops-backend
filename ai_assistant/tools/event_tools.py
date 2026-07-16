@@ -1,4 +1,5 @@
 from events.services import EventService
+from ai_assistant.chat_state import ChatState
 from events.serializers import EventReadSerializer, EventSummarySerializer, SeatSummarySerializer
 
 def get_all_events(date_filter=None, start_date=None, end_date=None, ordering=None):
@@ -20,11 +21,23 @@ def get_event_detail(event_id):
     return serializer.data
 
 
-def get_available_seats(request, event_id):
+def get_available_seats(request, event_id, conversation_id, chat_state):
     print("=> Executing get_available_seats tool with event_id:", event_id)
+    event = EventService.get_event_detail(event_id)
+
+    # Seat selection may happen in a later request, so retain the event in
+    # server-side state instead of trusting the model to remember its ID.
+    chat_state['selected_event_id'] = event.id
+    ChatState.save(conversation_id, chat_state)
+
     available_seats = EventService.get_available_seats(event_id)
     serializer = SeatSummarySerializer(available_seats, many=True)
-    return serializer.data
+
+    return {
+        "event_id": event.id,
+        "event_name": event.name,
+        "seats": serializer.data,
+    }
 
 
 def search_events(event_name):

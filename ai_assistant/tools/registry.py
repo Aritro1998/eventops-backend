@@ -6,6 +6,7 @@ from ai_assistant.tools.event_tools import (
 )
 
 from ai_assistant.tools.booking_tools import (
+    cancel_booking,
     create_booking,
     get_my_bookings,
     prepare_booking,
@@ -14,6 +15,7 @@ from ai_assistant.tools.booking_tools import (
 )
 
 from ai_assistant.tools.schemas import (
+    CANCEL_BOOKING_TOOL,
     CREATE_BOOKING_TOOL,
     GET_ALL_EVENTS_TOOL,
     GET_AVAILABLE_SEATS_TOOL,
@@ -44,6 +46,7 @@ TOOL_REGISTRY = {
     "get_available_seats": {
         "requires_auth": False,
         "requires_request": True,
+        "requires_chat_state": True,
         "function": get_available_seats,
         "schema": GET_AVAILABLE_SEATS_TOOL,
     },
@@ -61,6 +64,7 @@ TOOL_REGISTRY = {
     "prepare_booking": {
         "requires_auth": True,
         "requires_request": True,
+        "requires_chat_state": True,
         "function": prepare_booking,
         "schema": PREPARE_BOOKING_TOOL,
     },
@@ -75,5 +79,10 @@ TOOL_REGISTRY = {
         "requires_request": True,
         "function": retry_payment,
         "schema": RETRY_PAYMENT_TOOL,
+    },
+    "cancel_booking": {
+        "requires_auth": True,
+        "function": cancel_booking,
+        "schema": CANCEL_BOOKING_TOOL,
     },
 }

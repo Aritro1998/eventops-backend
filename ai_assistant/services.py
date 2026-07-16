@@ -1,23 +1,24 @@
 import json
-from openai import OpenAI
-from core.settings.base import OPENAI_API_KEY
-from ai_assistant.tools.registry import TOOL_REGISTRY
-from ai_assistant.models  import PendingBooking
 
+from openai import OpenAI
 from django.utils import timezone
 
-ALLOWED_HISTORY_ROLES = {"user", "assistant"}
+from ai_assistant.chat_state import ChatState
+from ai_assistant.models import PendingBooking
+from core.settings.base import OPENAI_API_KEY
+from events.models import Event
+from ai_assistant.tools.registry import TOOL_REGISTRY
 
 MAX_TOOL_CALLS = 5
 
-def get_system_prompt(user=None, request=None):
+def get_system_prompt(user=None, request=None, chat_state=None):
     now = timezone.localtime()
-    
+
     if user and user.is_authenticated:
         user_info = f"Current user is authenticated. Username: {user.username}, Email: {user.email}."
     else:
         user_info = "Current user is not authenticated."
-        
+
     if user and user.is_authenticated:
         pending_booking = PendingBooking.objects.filter(user=user).first()
         if pending_booking and pending_booking.is_expired:
@@ -25,7 +26,7 @@ def get_system_prompt(user=None, request=None):
             pending_booking = None
     else:
         pending_booking = None
-    
+
     if pending_booking:
         pending_booking_info = f"""
             Pending booking rules take priority over the normal booking flow.
@@ -35,10 +36,10 @@ def get_system_prompt(user=None, request=None):
             - changing event
             - cancelling it
             - asking an unrelated question
-            
+
             There is already a pending booking, pending booking rules and details are below.
 
-            If there is a pending booking and the user's message is an affirmative confirmation 
+            If there is a pending booking and the user's message is an affirmative confirmation
             such as "yes", "confirm", "proceed", "book it", "go ahead", or "looks good":
                 you MUST call create_booking in the same response.
                 Do not ask for confirmation again.
@@ -50,15 +51,20 @@ def get_system_prompt(user=None, request=None):
                 Do not say "I will prepare" unless the tool call has already been made.
 
             If the user wants a different event:
-                call search_events to search for the event id using the event name and call prepare_booking again.
-                
-            If there is a pending booking and the user clearly cancels or rejects it
-            with messages like "no", "cancel", "never mind", "stop", "don't book it", or "forget it":
-                you MUST call cancel_pending_booking in the same response.
-                Do not call create_booking.
-                Do not call prepare_booking.
-                Do not say the booking was cancelled unless the tool call has already been made.
-            
+                call search_events to find the new event. Then call get_available_seats
+                for that event before calling prepare_booking. get_available_seats updates
+                the server-side selected event. Do not call prepare_booking until it succeeds.
+
+            If the user clearly cancels or rejects the pending booking draft with messages
+            such as "no", "cancel this draft", "never mind", "stop", or "don't book it":
+                call cancel_pending_booking.
+
+            Do not call cancel_pending_booking when the user refers to a confirmed booking,
+            a booking ID, or says "cancel this booking" after a confirmed booking summary.
+
+            If both a pending draft and confirmed bookings exist and the request is ambiguous,
+            ask which booking the user wants to cancel.
+
             Pending booking details:
             - Event ID: {pending_booking.event.id}
             - Event Name: {pending_booking.event.name}
@@ -67,20 +73,32 @@ def get_system_prompt(user=None, request=None):
         """
     else:
         pending_booking_info = ""
-   
+
+    selected_event_info = ""
+
+    selected_event_id = (chat_state or {}).get("selected_event_id")
+    if selected_event_id:
+        selected_event = Event.objects.filter(id=selected_event_id).first()
+        if selected_event:
+            selected_event_info = f"""
+            - Current selected event: {selected_event.name}
+            - Current selected event ID: {selected_event.id}
+            prepare_booking uses this server-side event and accepts only seat numbers.
+            """
+
     system_prompt = f"""
-        You are an assistant for EventOps platform. 
+        You are an assistant for EventOps platform.
         Answer user queries about events, bookings, and payments in a helpful and concise manner.
         Only provide information that is relevant to the user's query. If you don't know the answer, say you don't know instead of making something up.
-        
+
         When a user refers to an event by name rather than id, use the available tools to discover the event id. Do not ask the user for internal ids if they can be found using tools.
         Always use available tools to retrieve the correct identifier before performing actions or answering questions that depend on those identifiers.
-        
+
         If multiple events with similar names are found, ask the user to clarify which event they mean before proceeding.
-        
+
         MANDATORY TOOL: When a user refers to an event by name, use the search_events tool to locate the event id every time.
         Do not infer event ids from event listings, list positions, previous messages, or memory.
-        
+
         Users do not know event ids or seat ids.
 
         When a booking request is made:
@@ -90,27 +108,34 @@ def get_system_prompt(user=None, request=None):
         4. Call prepare_booking.
         5. Show booking summary.
         6. Ask the user for confirmation.
-        
+
         When the user asks to retry payment, complete payment, pay again, or fix a failed payment:
         1. If the booking id is known from the user's message or conversation history, call retry_payment.
         2. If the booking id is not known, call get_my_bookings to show the user's bookings and ask which booking to retry.
         3. Never retry payment for a booking unless it belongs to the current authenticated user.
         
+        When the user asks to cancel a confirmed booking:
+        1. If the booking ID is known and the request is clear, call cancel_booking.
+        2. If it is unknown, call get_my_bookings with status CONFIRMED and ask the user which booking to cancel.
+        3. Use cancel_pending_booking only for an unconfirmed booking draft.
+
         If a tool result contains an error field:
         - Explain the error clearly to the user.
         - Do not claim the action succeeded.
         - If useful, suggest the next safe action, such as viewing bookings or starting a new booking.
-        
+
+        {selected_event_info}
+
         {pending_booking_info}
-        
+
         Never create a booking without explicit confirmation.
         Never guess event ids or seat ids.
-        Always retrieve them through tools. 
-        
+        Always retrieve them through tools.
+
         After any tool call succeeds, speak in the past tense.
         Say what was done using the tool result.
         Never claim an action was completed unless the tool result confirms it.
-             
+
         Current date: {now.date().isoformat()}
         Current time: {now.strftime("%H:%M:%S")}
         Current day: {now.strftime('%A')}
@@ -118,47 +143,34 @@ def get_system_prompt(user=None, request=None):
         Currency is in INR. Always show prices with the currency unit, for example: ₹500.
         {user_info}
     """
-    
+
     return system_prompt
-
-
-def normalize_history(history):
-    messages = []
-
-    for item in history or []:
-        if not isinstance(item, dict):
-            continue
-
-        role = item.get("role")
-        content = item.get("content")
-
-        if role in ALLOWED_HISTORY_ROLES and isinstance(content, str) and content:
-            messages.append({
-                "role": role,
-                "content": content
-            })
-
-    return messages
-
 
 class AIAssistantService:
     def __init__(self):
         self.client = OpenAI(api_key=OPENAI_API_KEY)
 
-    def chat(self, user_prompt, history, user=None, request=None):
+    def chat(self, user_prompt, user=None, request=None, conversation_id=None, chat_state=None):
         # 1. Create the system prompt
         messages = [
-            {"role": "system", "content": get_system_prompt(user, request)},
-            *normalize_history(history),
+            {
+                "role": "system",
+                "content": get_system_prompt(
+                    user=user,
+                    request=request,
+                    chat_state=chat_state,
+                )
+            },
+            *chat_state["history"],
             {"role": "user", "content": user_prompt},
         ]
-        
+
         # 2. Create the tools
         tools = [
             tool_config["schema"]
             for tool_config in TOOL_REGISTRY.values()
         ]
-        
+
         # 3. Make the first OpenAI call
         try:
             response = self.client.chat.completions.create(
@@ -176,17 +188,23 @@ class AIAssistantService:
         # 4. Make the tool calls
         for _ in range(MAX_TOOL_CALLS):
             message = response.choices[0].message
-            # If there are no tool calls, return the response
+            # If there are no tool calls, add the turn and return the response
             if not message.tool_calls:
+                # Persist only completed visible turns. Tool calls are local to
+                # this request; booking selection is separate structured state.
+                ChatState.add_turn(chat_state, "user", user_prompt)
+                ChatState.add_turn(chat_state, "assistant", message.content)
+                ChatState.save(conversation_id, chat_state)
+
                 return message.content
-            
+
             messages.append(message)
             # Loop through the tool calls
             for tool_call in message.tool_calls:
                 tool_name = tool_call.function.name
                 args = json.loads(tool_call.function.arguments)
                 tool_config = TOOL_REGISTRY.get(tool_name)
-                
+
                 if not tool_config:
                     messages.append(
                         {
@@ -196,7 +214,7 @@ class AIAssistantService:
                         }
                     )
                     continue
-                
+
                 tool_function = tool_config["function"]
                 require_auth = tool_config.get("requires_auth", False)
                 # If the tool requires authentication and the user is not authenticated, return an error
@@ -209,21 +227,27 @@ class AIAssistantService:
                         }
                     )
                     continue
-                
+
                 # Create the kwargs for the tool
                 kwargs = dict(args)
-                
+
                 if require_auth:
                     kwargs["user"] = user
-                
+
                 if tool_config.get("requires_request"):
                     kwargs["request"] = request
-                
+
+                if tool_config.get("requires_chat_state"):
+                    # State is server-owned, so a model cannot supply or alter
+                    # another conversation ID through tool arguments.
+                    kwargs["conversation_id"] = conversation_id
+                    kwargs["chat_state"] = chat_state
+
                 try:
                     tool_result = tool_function(**kwargs)
                 except Exception as e:
                     tool_result = {"error": str(e)}
-                    
+
                 # Add the tool result to the conversation history
                 messages.append(
                     {
@@ -232,7 +256,7 @@ class AIAssistantService:
                         "content": json.dumps(tool_result)
                     }
                 )
-                   
+
             # 5. Make the second OpenAI call
             try:
                 response = self.client.chat.completions.create(
@@ -245,7 +269,7 @@ class AIAssistantService:
             except Exception as e:
                 print("SECOND OPENAI CALL FAILED:", str(e))
                 raise
-            
+
         return (
             "[MAX_TOOL_CALLS_EXCEEDED] Sorry, I unfortunately I was unable to complete that request. "
             "Please try again later."

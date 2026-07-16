@@ -179,9 +179,6 @@ PREPARE_BOOKING_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "event_id": {
-                    "type": "integer"
-                },
                 "seat_numbers": {
                     "type": "array",
                     "items": {
@@ -189,10 +186,7 @@ PREPARE_BOOKING_TOOL = {
                     }
                 }
             },
-            "required": [
-                "event_id",
-                "seat_numbers"
-            ]
+            "required": ["seat_numbers"]
         }
     }
 }
@@ -233,6 +227,29 @@ RETRY_PAYMENT_TOOL = {
                 "booking_id": {
                     "type": "integer",
                     "description": "The user's booking id to retry payment for."
+                }
+            },
+            "required": ["booking_id"]
+        }
+    }
+}
+
+
+CANCEL_BOOKING_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "cancel_booking",
+        "description": (
+            "Cancel one of the authenticated user's confirmed bookings. "
+            "Use only after a clear cancellation request. "
+            "If the booking ID is unknown, call get_my_bookings first."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "booking_id": {
+                    "type": "integer",
+                    "description": "The confirmed booking ID to cancel."
                 }
             },
             "required": ["booking_id"]
