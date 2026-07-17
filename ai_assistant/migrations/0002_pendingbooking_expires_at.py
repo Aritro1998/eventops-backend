@@ -14,6 +14,6 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='pendingbooking',
             name='expires_at',
-            field=models.DateTimeField(db_index=True, default=ai_assistant.models.get_pending_booking_expiry),
+            field=models.DateTimeField(db_index=True, default=ai_assistant.models.get_pending_action_expiry),
         ),
     ]

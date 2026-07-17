@@ -23,6 +23,12 @@ from .actions.cancellation_actions import (
     get_pending_cancellation_actions,
 )
 
+from .actions.payment_actions import (
+    confirm_payment_retry,
+    dismiss_payment_retry,
+    get_pending_payment_retry_actions,
+)
+
 
 
 def persist_action_outcome(request, response_text):
@@ -42,6 +48,24 @@ def persist_action_outcome(request, response_text):
 
     ChatState.add_turn(chat_state, "assistant", response_text)
     ChatState.save(conversation_id, chat_state)
+    
+    
+def get_all_pending_actions(user):
+    """Merge every action family into one list for the frontend.
+
+    All three are independent and can be non-empty at once (e.g. a leftover
+    seat draft, a staged cancellation, AND a staged payment retry are three
+    unrelated bookings). Every place that reports "actions" — the chat
+    endpoint and every action view — should call this instead of hand-rolling
+    a subset or hardcoding [], so a click on one button never wipes out an
+    unrelated pending item that's still waiting on its own click.
+    """
+    
+    return (
+        get_pending_booking_actions(user)
+        + get_pending_cancellation_actions(user)
+        + get_pending_payment_retry_actions(user)
+    )
 
 
 class ChatView(APIView):
@@ -65,7 +89,7 @@ class ChatView(APIView):
 
         try:
             ai_service = AIAssistantService()
-            response, draft, cancellation = ai_service.chat(
+            response, draft, cancellation, payment_retry = ai_service.chat(
                 user_prompt,
                 user=request.user,
                 request=request,
@@ -73,19 +97,16 @@ class ChatView(APIView):
                 chat_state=chat_state
             )
             
-            actions = []
-            if request.user.is_authenticated:
-                # Both lists can be non-empty at once — e.g. a leftover seat
-                # draft AND a staged cancellation are unrelated and can coexist.
-                actions = get_pending_booking_actions(request.user) + get_pending_cancellation_actions(request.user)
-
+            actions = get_all_pending_actions(request.user) if request.user.is_authenticated else []
+            
             return Response(
                 {
                     'response': response,
                     'conversation_id': conversation_id,
                     'actions': actions,
                     'draft': draft,
-                    'cancellation': cancellation
+                    'cancellation': cancellation,
+                    'payment_retry': payment_retry,
                 }
             )
 
@@ -131,7 +152,7 @@ class ConfirmPendingBookingActionView(APIView):
             {
                 "response": response_text,
                 "booking": booking,
-                "actions": [],
+                "actions": get_all_pending_actions(request.user),
             }
         )
 
@@ -156,7 +177,7 @@ class CancelPendingBookingActionView(APIView):
             {
                 "response": response_text,
                 "draft": result,
-                "actions": []
+                "actions": get_all_pending_actions(request.user),
             }
         )
         
@@ -189,13 +210,13 @@ class ConfirmCancellationActionView(APIView):
                 # renderer already knows how to display any dict shaped
                 # like a booking, it just switches on booking["status"].
                 "booking": booking,
-                "actions": [],
+                "actions": get_all_pending_actions(request.user),
             }
         )
-        
+
 
 class DismissCancellationActionView(APIView):
-    parser_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated]
     throttle_classes = [BookingThrottle]
     
     def post(self, request):
@@ -209,12 +230,74 @@ class DismissCancellationActionView(APIView):
             
         response_text = f"Kept your booking for {booking['event_name']}. It was not cancelled."
         persist_action_outcome(request, response_text)
-        
+
         return Response(
             {
                 "response": response_text,
                 "booking": booking,
-                "actions": [],
+                "actions": get_all_pending_actions(request.user),
             }
         )
+        
+        
+class ConfirmPaymentRetryActionView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [BookingThrottle]
+
+    def post(self, request):
+        try:
+            booking = confirm_payment_retry(request.user)
+        except ValueError as error:
+            return Response(
+                {"detail": str(error)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if booking["status"] == "CONFIRMED":
+            response_text = (
+                f"Your payment for {booking['event_name']} succeeded. "
+                f"Booking ID: {booking['booking_id']}."
+            )
+        else:
+            response_text = (
+                f"That attempt for {booking['event_name']} ended with status "
+                f"{booking['status']}. Booking ID: {booking['booking_id']}."
+            )
+
+        persist_action_outcome(request, response_text)
+
+        return Response(
+            {
+                "response": response_text,
+                "booking": booking,
+                "actions": get_all_pending_actions(request.user),
+            }
+        )
+
+
+class DismissPaymentRetryActionView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [BookingThrottle]
+
+    def post(self, request):
+        try:
+            booking = dismiss_payment_retry(request.user)
+        except ValueError as error:
+            return Response(
+                {"detail": str(error)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        response_text = f"Okay, leaving the payment for {booking['event_name']} as-is for now."
+        persist_action_outcome(request, response_text)
+
+        return Response(
+            {
+                "response": response_text,
+                "booking": booking,
+                "actions": get_all_pending_actions(request.user),
+            }
+        )
+        
+        
         

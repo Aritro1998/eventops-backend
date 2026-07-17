@@ -17,6 +17,12 @@ CONFIRM_CANCEL_URL = (
 KEEP_BOOKING_URL = (
     "http://web:8000/api/ai-assistant/actions/keep-booking/"
 )
+CONFIRM_PAYMENT_RETRY_URL = (
+    "http://web:8000/api/ai-assistant/actions/confirm-payment-retry/"
+)
+DISMISS_PAYMENT_RETRY_URL = (
+    "http://web:8000/api/ai-assistant/actions/dismiss-payment-retry/"
+)
 DJANGO_LOGIN_URL = "http://web:8000/api/auth/token/"
 DJANGO_REGISTER_URL = "http://web:8000/api/auth/register/"
 
@@ -241,6 +247,24 @@ def format_event_time(iso_string):
     return dt.strftime("%d %b %Y, %I:%M %p")
 
 
+def format_time_remaining(iso_string):
+    # A snapshot computed once at render time, not a live-ticking clock — see
+    # the retry-payment design discussion for why a real tick isn't worth it
+    # here (chat history is a static list of already-rendered strings).
+    try:
+        expires_at = datetime.fromisoformat(iso_string)
+    except (TypeError, ValueError):
+        return "unknown"
+
+    now = datetime.now(expires_at.tzinfo) if expires_at.tzinfo else datetime.now()
+    remaining_seconds = (expires_at - now).total_seconds()
+    if remaining_seconds <= 0:
+        return "expired"
+
+    minutes = int(remaining_seconds // 60)
+    return f"~{minutes} min" if minutes >= 1 else "<1 min"
+
+
 def render_status_card(icon, accent, title, subtitle, rows):
     rows_html = "".join(
         f"<tr>"
@@ -271,6 +295,8 @@ BOOKING_STATUS_CARD_STYLES = {
     "CONFIRMED": ("&#10003;", "#16a34a", "Booking Confirmed", "Your booking has been successfully confirmed."),
     "CANCELLED": ("&#10005;", "#dc2626", "Booking Cancelled", "This booking has been cancelled."),
     "KEPT": ("&#10003;", "#16a34a", "Booking Kept", "Your booking was not cancelled."),
+    "FAILED": ("&#9888;", "#d97706", "Booking Failed", "Payment didn't go through this time."),
+    "EXPIRED": ("&#10005;", "#dc2626", "Booking Expired", "No more retries are available for this booking."),
 }
 
 
@@ -281,8 +307,8 @@ def render_booking_card(booking):
     if status in BOOKING_STATUS_CARD_STYLES:
         icon, accent, title, subtitle = BOOKING_STATUS_CARD_STYLES[status]
     else:
-        # Anything else (FAILED, EXPIRED, ...) falls back to a generic
-        # "still pending" style rather than needing an entry per status.
+        # Anything else falls back to a generic "still pending" style rather
+        # than needing an entry per status.
         icon, accent, title = "&#8987;", "#d97706", "Booking Pending"
         subtitle = f"Your booking was created with status {escape(status)}."
 
@@ -293,6 +319,16 @@ def render_booking_card(booking):
         ("Amount", f"₹{escape(booking.get('amount', ''))}"),
         ("Booking ID", escape(str(booking.get("booking_id", "")))),
     ]
+
+    # FAILED is the one status where "what happens next" matters enough to
+    # earn extra rows — these are exactly the numbers that decide whether
+    # clicking Retry Payment Now is worth it.
+    if status == "FAILED":
+        if "attempts_remaining" in booking:
+            rows.append(("Attempts Remaining", escape(str(booking["attempts_remaining"]))))
+        if "expires_at" in booking:
+            rows.append(("Expires In", escape(format_time_remaining(booking["expires_at"]))))
+
     return render_status_card(icon, accent, title, subtitle, rows)
 
 
@@ -331,6 +367,30 @@ def render_cancel_prepare_card(cancellation):
         "#d97706",
         "Cancel This Booking?",
         "Review the details, then confirm the cancellation or keep your booking below.",
+        rows,
+    )
+
+
+def render_payment_retry_prepare_card(payment_retry):
+    # Shown when the AI stages a retry conversationally (prepare_payment_retry
+    # ran this turn). Attempts Remaining and Expires In matter more here than
+    # anywhere else in the app — a retry isn't guaranteed to succeed, so this
+    # is the number that decides whether clicking is even worth it.
+    seats = ", ".join(str(s) for s in payment_retry.get("seat_numbers", []))
+    rows = [
+        ("Event", escape(payment_retry.get("event_name", ""))),
+        ("Seat", escape(seats)),
+        ("Time", escape(format_event_time(payment_retry.get("event_start_time", "")))),
+        ("Amount", f"₹{escape(payment_retry.get('amount', ''))}"),
+        ("Booking ID", escape(str(payment_retry.get("booking_id", "")))),
+        ("Attempts Remaining", escape(str(payment_retry.get("attempts_remaining", "")))),
+        ("Expires In", escape(format_time_remaining(payment_retry.get("expires_at", "")))),
+    ]
+    return render_status_card(
+        "&#8635;",
+        "var(--color-accent)",
+        "Retry This Payment?",
+        "A retry is not guaranteed to succeed. Review the details, then retry now or wait.",
         rows,
     )
 
@@ -396,7 +456,7 @@ def chat_with_ai(message, token, conversation_id):
     data = request_json(DJANGO_API_URL, token=token, payload=payload)
     if "error" in data:
         # Keep the existing action panel visible after a transient chat failure.
-        return data["error"], conversation_id, None, None, None
+        return data["error"], conversation_id, None, None, None, None
 
     return (
         data.get("response", "Unknown error"),
@@ -404,6 +464,7 @@ def chat_with_ai(message, token, conversation_id):
         data.get("actions", []),
         data.get("draft"),
         data.get("cancellation"),
+        data.get("payment_retry"),
     )
 
 
@@ -467,13 +528,15 @@ def register(username, email, password):
 
 
 def action_updates(actions):
-    # Two independent action "families" can appear in the same list at once —
-    # e.g. a leftover seat draft AND a staged cancellation are unrelated and
-    # can coexist — so each row's visibility is computed from its own action
-    # types instead of treating the whole list as one mutually-exclusive state.
+    # Three independent action "families" can appear in the same list at
+    # once — a leftover seat draft, a staged cancellation, and a staged
+    # payment retry are all unrelated bookings and can coexist — so each
+    # row's visibility is computed from its own action types instead of
+    # treating the whole list as one mutually-exclusive state.
     action_types = {action["type"] for action in actions}
     has_draft_actions = bool({"confirm_pending_booking", "cancel_pending_booking"} & action_types)
     has_cancel_actions = bool({"confirm_cancel_booking", "keep_booking"} & action_types)
+    has_retry_actions = bool({"confirm_payment_retry", "dismiss_payment_retry"} & action_types)
 
     return (
         actions,
@@ -483,6 +546,9 @@ def action_updates(actions):
         gr.update(visible=has_cancel_actions),
         gr.update(visible="confirm_cancel_booking" in action_types),
         gr.update(visible="keep_booking" in action_types),
+        gr.update(visible=has_retry_actions),
+        gr.update(visible="confirm_payment_retry" in action_types),
+        gr.update(visible="dismiss_payment_retry" in action_types),
         # Hide the composer whenever anything is pending, not just drafts.
         gr.update(visible=not actions),
     )
@@ -515,7 +581,7 @@ def get_ai_response(history, token, conversation_id, current_actions):
         return history, conversation_id, *action_updates(current_actions)
 
     message = history[-1]["content"]
-    response, conversation_id, actions, draft, cancellation = chat_with_ai(
+    response, conversation_id, actions, draft, cancellation, payment_retry = chat_with_ai(
         message,
         token,
         conversation_id,
@@ -524,6 +590,8 @@ def get_ai_response(history, token, conversation_id, current_actions):
         content = render_draft_card(draft)
     elif cancellation:
         content = render_cancel_prepare_card(cancellation)
+    elif payment_retry:
+        content = render_payment_retry_prepare_card(payment_retry)
     else:
         content = response
     history = history + [{"role": "assistant", "content": content}]
@@ -619,6 +687,12 @@ with gr.Blocks(
                 confirm_cancel_btn = gr.Button("Confirm Cancellation", variant="stop", visible=False)
                 keep_booking_btn = gr.Button("Keep Booking", variant="secondary", visible=False)
 
+            # A third independent row — a staged payment retry is also
+            # unrelated to the other two and can be pending alongside them.
+            with gr.Row(visible=False, elem_classes=["draft-actions"]) as payment_retry_row:
+                confirm_retry_btn = gr.Button("Retry Payment Now", variant="primary", visible=False)
+                dismiss_retry_btn = gr.Button("Not Now", variant="secondary", visible=False)
+
             with gr.Row(elem_classes=["composer"]) as composer_row:
                 msg = gr.Textbox(
                     placeholder="Ask about events...",
@@ -653,6 +727,9 @@ with gr.Blocks(
             cancellation_row,
             confirm_cancel_btn,
             keep_booking_btn,
+            payment_retry_row,
+            confirm_retry_btn,
+            dismiss_retry_btn,
             composer_row,
         ],
     )
@@ -668,6 +745,9 @@ with gr.Blocks(
         cancellation_row,
         confirm_cancel_btn,
         keep_booking_btn,
+        payment_retry_row,
+        confirm_retry_btn,
+        dismiss_retry_btn,
         composer_row,
     ]
     send_btn.click(
@@ -687,6 +767,9 @@ with gr.Blocks(
         cancellation_row,
         confirm_cancel_btn,
         keep_booking_btn,
+        payment_retry_row,
+        confirm_retry_btn,
+        dismiss_retry_btn,
         composer_row,
     ]
     confirm_draft_btn.click(
@@ -733,6 +816,30 @@ with gr.Blocks(
             actions,
             conversation_id,
             "Keep Booking",
+        ),
+        inputs=action_inputs,
+        outputs=action_outputs,
+    )
+    confirm_retry_btn.click(
+        fn=lambda token, history, actions, conversation_id: run_draft_action(
+            CONFIRM_PAYMENT_RETRY_URL,
+            token,
+            history,
+            actions,
+            conversation_id,
+            "Retry Payment Now",
+        ),
+        inputs=action_inputs,
+        outputs=action_outputs,
+    )
+    dismiss_retry_btn.click(
+        fn=lambda token, history, actions, conversation_id: run_draft_action(
+            DISMISS_PAYMENT_RETRY_URL,
+            token,
+            history,
+            actions,
+            conversation_id,
+            "Not Now",
         ),
         inputs=action_inputs,
         outputs=action_outputs,

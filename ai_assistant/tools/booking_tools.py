@@ -4,7 +4,8 @@ from events.services import EventService
 from bookings.services import BookingService
 from payments.services import PaymentService
 from bookings.serializers import BookingReadSerializer
-from ai_assistant.models import PendingBooking, get_pending_booking_expiry, PendingBookingCancellation
+from ai_assistant.actions.payment_actions import stage_payment_retry
+from ai_assistant.models import PendingBooking, get_pending_action_expiry, PendingBookingCancellation
 
 
 def get_my_bookings(user, status=None):
@@ -62,7 +63,7 @@ def prepare_booking(user, request, seat_numbers, conversation_id, chat_state):
             "event": event,
             "seat_numbers": seat_numbers,
             "amount": event.price * len(seat_numbers),
-            "expires_at": get_pending_booking_expiry(),
+            "expires_at": get_pending_action_expiry(),
         }
    )
 
@@ -77,8 +78,8 @@ def prepare_booking(user, request, seat_numbers, conversation_id, chat_state):
     }
 
 
-def retry_payment(user, request, booking_id):
-    print("=> Executing retry_payment tool with booking_id:", booking_id)
+def prepare_payment_retry(user, request, booking_id):
+    print("=> Executing prepare_payment_retry tool with booking_id:", booking_id)
 
     # Fetch the booking with the given booking_id and ensure it belongs to the user
     booking = (
@@ -95,13 +96,18 @@ def retry_payment(user, request, booking_id):
     if booking.status not in ["FAILED", "PENDING"]:
         raise ValueError("Payment cannot be retried for this booking status.")
 
-    # Retry the payment using the PaymentService
-    PaymentService.process_payment(booking.id)
-    # Refresh the booking instance to get the updated status and payment details
-    booking.refresh_from_db()
-    serializer = BookingReadSerializer(booking)
+   # Stage the request — this does NOT attempt payment. The real attempt
+    # only happens if the user clicks "Retry Payment Now" (see
+    # ConfirmPaymentRetryActionView), never this tool.
+    stage_payment_retry(booking)
 
-    return serializer.data
+    return {
+        "booking_id": booking.id,
+        "event_name": booking.event.name,
+        "seat_numbers": [bs.seat.seat_number for bs in booking.booking_seats.all()],
+        "amount": str(booking.amount),
+        "status": "awaiting_retry_confirmation",
+    }
 
 
 def prepare_cancel_booking(user, booking_id):
@@ -125,7 +131,7 @@ def prepare_cancel_booking(user, booking_id):
     # dedicated endpoint (see ConfirmCancellationActionView), never this tool.
     PendingBookingCancellation.objects.update_or_create(
         user=user,
-        defaults={"booking": booking},
+        defaults={"booking": booking, "expires_at": get_pending_action_expiry()},
     )
 
     return {

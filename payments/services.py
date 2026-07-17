@@ -11,6 +11,8 @@ from bookings.models import Booking
 logger = logging.getLogger(__name__)
 
 class PaymentService:
+    
+    MAX_RETRIES = 3
 
     @staticmethod
     def invalidate_event_cache(event_id):
@@ -67,7 +69,7 @@ class PaymentService:
                 )
 
             # Retry limit check
-            elif booking.retry_count >= 3:
+            elif booking.retry_count >= PaymentService.MAX_RETRIES:
                 booking.status = "EXPIRED"
                 booking.save(update_fields=["status", "updated_at"])
                 error_message = "Retry limit exceeded"
@@ -138,7 +140,7 @@ class PaymentService:
                     payment.status = "FAILED"
 
                     # Decide next state
-                    if booking.retry_count >= 3 or (booking.expires_at and booking.expires_at < now):
+                    if booking.retry_count >= PaymentService.MAX_RETRIES or (booking.expires_at and booking.expires_at < now):
                         booking.status = "EXPIRED"
                     else:
                         booking.status = "FAILED"

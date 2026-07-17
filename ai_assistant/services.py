@@ -7,8 +7,8 @@ from ai_assistant.chat_state import ChatState
 from ai_assistant.models import PendingBooking
 from ai_assistant.tools.registry import TOOL_REGISTRY
 from ai_assistant.actions.booking_actions import get_pending_booking_draft
+from ai_assistant.actions.payment_actions import get_pending_payment_retry_draft
 from ai_assistant.actions.cancellation_actions import get_pending_cancellation_draft
-
 
 MAX_TOOL_CALLS = 5
 
@@ -105,19 +105,40 @@ def get_system_prompt(user=None, request=None, chat_state=None):
         Tell them to use the displayed Confirm booking or Cancel draft button below the chat.
 
         When the user asks to retry payment, complete payment, pay again, or fix a failed payment:
-        1. If the booking id is known from the user's message or conversation history, call retry_payment.
-        2. If the booking id is not known, call get_my_bookings to show the user's bookings and ask which booking to retry.
-        3. Never retry payment for a booking unless it belongs to the current authenticated user.
+        1. If the booking id is known, call prepare_payment_retry.
+        2. If it is not known, call get_my_bookings and ask which booking to retry.
+        3. Disambiguation is about distinct booking ids, not seats. A single
+           booking can have multiple seats (get_my_bookings returns one entry
+           per booking, with a "seats" list nested inside it) — that is one
+           match, not several. Only ask the user to pick between bookings
+           when get_my_bookings actually returns more than one distinct
+           booking id eligible for retry. If there is exactly one eligible
+           booking, call prepare_payment_retry for it directly — do not ask
+           the user to choose between its individual seats.
+        4. If there truly is more than one eligible booking (e.g. two failed
+           bookings for the same event), list seat numbers and booking id for
+           each match and ask the user to pick — never guess which one they mean.
+        5. Never claim the payment was retried — only a click on the displayed
+           Retry Payment Now control actually attempts it.
+        6. Never retry payment for a booking unless it belongs to the current authenticated user.
 
         When the user asks to cancel a confirmed booking:
         1. If the booking ID is known and the request is clear, call prepare_cancel_booking.
         2. If it is unknown, call get_my_bookings with status CONFIRMED and ask the user which booking to cancel.
-        3. If more than one booking could match (e.g. two bookings for the same
-           event), list seat number and booking id for each match and ask the
-           user to pick — never guess which one they mean.
-        4. Never claim the booking was cancelled — only a click on the displayed
+        3. Disambiguation is about distinct booking ids, not seats. A single
+           booking can have multiple seats (get_my_bookings returns one entry
+           per booking, with a "seats" list nested inside it) — that is one
+           match, not several. Only ask the user to pick between bookings
+           when get_my_bookings actually returns more than one distinct
+           booking id. If there is exactly one matching booking, call
+           prepare_cancel_booking for it directly — do not ask the user to
+           choose between its individual seats.
+        4. If there truly is more than one matching booking (e.g. two bookings
+           for the same event), list seat numbers and booking id for each
+           match and ask the user to pick — never guess which one they mean.
+        5. Never claim the booking was cancelled — only a click on the displayed
            Confirm Cancellation control actually cancels it.
-        5. For an unconfirmed draft, direct the user to the displayed Cancel draft control.
+        6. For an unconfirmed draft, direct the user to the displayed Cancel draft control.
 
         If a tool result contains an error field:
         - Explain the error clearly to the user.
@@ -188,6 +209,7 @@ class AIAssistantService:
         # 4. Make the tool calls
         booking_drafted = False
         cancellation_requested = False
+        payment_retry_requested = False
         for _ in range(MAX_TOOL_CALLS):
             message = response.choices[0].message
             # If there are no tool calls, add the turn and return the response
@@ -202,7 +224,8 @@ class AIAssistantService:
                 # or updated it, not on every later unrelated message.
                 draft = get_pending_booking_draft(user) if booking_drafted else None
                 cancellation = get_pending_cancellation_draft(user) if cancellation_requested else None
-                return message.content, draft, cancellation
+                payment_retry = get_pending_payment_retry_draft(user) if payment_retry_requested else None
+                return message.content, draft, cancellation, payment_retry
 
             messages.append(message)
             # Loop through the tool calls
@@ -255,6 +278,8 @@ class AIAssistantService:
                         booking_drafted = True
                     if tool_name == "prepare_cancel_booking" and "error" not in tool_result:
                         cancellation_requested = True
+                    if tool_name == "prepare_payment_retry" and "error" not in tool_result:
+                        payment_retry_requested = True
                 except Exception as e:
                     tool_result = {"error": str(e)}
 
@@ -283,4 +308,4 @@ class AIAssistantService:
         return (
             "[MAX_TOOL_CALLS_EXCEEDED] Sorry, I unfortunately I was unable to complete that request. "
             "Please try again later."
-        ), None, None
+        ), None, None, None

@@ -176,23 +176,28 @@ PREPARE_BOOKING_TOOL = {
 }
 
 
-RETRY_PAYMENT_TOOL = {
+PREPARE_PAYMENT_RETRY_TOOL = {
     "type": "function",
     "function": {
-        "name": "retry_payment",
+        "name": "prepare_payment_retry",
         "description": (
-            "Retry payment for one of the current user's existing bookings. "
-            "Use this when the user asks to retry payment, pay again, complete payment, "
-            "or fix a failed/pending payment. "
-            "Requires the booking id. If the user does not provide a booking id, "
-            "call get_my_bookings first or ask which booking they mean."
+            "Stage a payment retry for one of the current user's FAILED or "
+            "PENDING bookings. This does NOT attempt the payment — it only "
+            "prepares it for confirmation. After this tool succeeds, tell the "
+            "user to use the displayed Retry Payment Now or Not Now controls. "
+            "Never say the payment was retried unless a backend tool result "
+            "confirms it. If the booking id is not known, call get_my_bookings "
+            "first. If more than one booking could match (e.g. two failed "
+            "bookings for the same event), list the distinguishing details — "
+            "seat number and booking id — for each match and ask the user to "
+            "pick one. Never guess or default to the most recent match."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "booking_id": {
                     "type": "integer",
-                    "description": "The user's booking id to retry payment for."
+                    "description": "The user's booking id to stage a payment retry for."
                 }
             },
             "required": ["booking_id"]

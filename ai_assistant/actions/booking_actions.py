@@ -1,7 +1,9 @@
 import uuid
 from events.models import Event, Seat
+from payments.services import PaymentService
 from bookings.services import BookingService
 from ai_assistant.models import PendingBooking
+from ai_assistant.actions.payment_actions import stage_payment_retry
 
 
 def get_pending_booking_actions(user):
@@ -71,6 +73,9 @@ def confirm_pending_booking(user):
     )
 
     pending.delete()
+    
+    if booking.status == "FAILED" and booking.retry_count < PaymentService.MAX_RETRIES:
+        stage_payment_retry(booking)
 
     return {
         "booking_id": booking.id,
@@ -80,6 +85,8 @@ def confirm_pending_booking(user):
         "amount": str(booking.amount),
         "is_existing": is_existing,
         "event_start_time": event.start_time.isoformat(),
+        "expires_at": booking.expires_at.isoformat(),
+        "attempts_remaining": max(0, PaymentService.MAX_RETRIES - booking.retry_count),
     }
 
 

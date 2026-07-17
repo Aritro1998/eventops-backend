@@ -10,6 +10,10 @@ def get_pending_cancellation_actions(user):
     if not pending:
         return []
     
+    if pending.is_expired:
+        pending.delete()
+        return []
+    
     return [
         {"type": "confirm_cancel_booking", "label": "Confirm Cancellation"},
         {"type": "keep_booking", "label": "Keep Booking"},
@@ -27,7 +31,7 @@ def get_pending_cancellation_draft(user):
         .first()
     )
     
-    if not pending:
+    if not pending or pending.is_expired:
         return None
     
     booking = pending.booking
@@ -54,13 +58,24 @@ def confirm_cancellation(user):
     if not pending:
         raise ValueError("No pending cancellation found")
     
+    if pending.is_expired:
+        pending.delete()
+        raise ValueError("This cancellation request has expired. Please try again.")
+    
     booking = pending.booking
     seat_numbers = [bs.seat.seat_number for bs in booking.booking_seats.all()]
     
-    # This raises ValueError if the booking is no longer CONFIRMED (e.g. it
-    # expired or was already cancelled through another path since staging) —
-    # that's the re-validation this design relies on instead of an expiry field.
-    booking = BookingService.cancel_booking(booking)
+    try:
+        # This raises ValueError if the booking is no longer CONFIRMED (e.g. it
+        # expired or was already cancelled through another path since staging) —
+        # that's the re-validation this design relies on instead of an expiry field.
+        booking = BookingService.cancel_booking(booking)
+    except ValueError:
+        # Whatever blocked this attempt means there's nothing left to stage —
+        # clear the pending row so the buttons don't linger for a booking
+        # that can no longer be cancelled. 
+        pending.delete()
+        raise
     
     pending.delete()
     
