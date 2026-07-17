@@ -93,9 +93,17 @@ class EventService:
         
     @staticmethod
     def get_available_seats(event_id):
+        now = timezone.now()
+
+        # Mirrors BookingService.get_unavailable_seat_ids so a seat shown here
+        # as available is never rejected as taken when actually booked, and
+        # vice versa: CONFIRMED is always taken, PENDING/FAILED only while
+        # their hold hasn't expired yet.
         unavailable_seat_ids = BookingSeat.objects.filter(
-            booking__event_id=event_id,
-            booking__status__in=['CONFIRMED', 'PENDING']
+            booking__event_id=event_id
+        ).filter(
+            Q(booking__status='CONFIRMED') |
+            Q(booking__status__in=['PENDING', 'FAILED'], booking__expires_at__gt=now)
         ).values_list(
             "seat_id",
             flat=True

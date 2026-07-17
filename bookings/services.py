@@ -295,15 +295,6 @@ class BookingService:
             key=idempotency_key,
         )
         
-        logger.warning(
-            "debug_booking_result",
-            extra={
-                "booking": str(booking),
-                "seat_unavailable": seat_unavailable,
-                "is_existing": is_existing,
-            }
-        )
-        
         if booking is None and not seat_unavailable:
             raise ValueError(
                 "Booking creation failed unexpectedly."

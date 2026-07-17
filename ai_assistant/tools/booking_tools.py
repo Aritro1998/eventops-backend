@@ -1,3 +1,5 @@
+import logging
+
 from bookings.models import Booking
 from events.models import Event, Seat
 from events.services import EventService
@@ -7,9 +9,14 @@ from bookings.serializers import BookingReadSerializer
 from ai_assistant.actions.payment_actions import stage_payment_retry
 from ai_assistant.models import PendingBooking, get_pending_action_expiry, PendingBookingCancellation
 
+logger = logging.getLogger(__name__)
+
 
 def get_my_bookings(user, status=None):
-    print("=> Executing get_my_bookings tool with status:", status)
+    logger.info(
+        "ai_tool_get_my_bookings",
+        extra={"event": "ai_tool_get_my_bookings", "user_id": user.id, "status": status}
+    )
     bookings = BookingService.get_user_bookings(user, status_filter=status)
     serializer = BookingReadSerializer(bookings, many=True)
     return serializer.data
@@ -22,7 +29,15 @@ def prepare_booking(user, request, seat_numbers, conversation_id, chat_state):
     if event_id is None:
         raise ValueError("Choose an event and view its available seats before selecting seats.")
 
-    print(f"=> Executing prepare_booking tool for event_id: {event_id} with seat_numbers: {seat_numbers}")
+    logger.info(
+        "ai_tool_prepare_booking",
+        extra={
+            "event": "ai_tool_prepare_booking",
+            "user_id": user.id,
+            "event_id": event_id,
+            "seat_numbers": seat_numbers,
+        }
+    )
 
     # Reject duplicates before calculating the price or creating the draft.
     if not seat_numbers or len(seat_numbers) != len(set(seat_numbers)):
@@ -79,7 +94,10 @@ def prepare_booking(user, request, seat_numbers, conversation_id, chat_state):
 
 
 def prepare_payment_retry(user, request, booking_id):
-    print("=> Executing prepare_payment_retry tool with booking_id:", booking_id)
+    logger.info(
+        "ai_tool_prepare_payment_retry",
+        extra={"event": "ai_tool_prepare_payment_retry", "user_id": user.id, "booking_id": booking_id}
+    )
 
     # Fetch the booking with the given booking_id and ensure it belongs to the user
     booking = (
@@ -111,7 +129,10 @@ def prepare_payment_retry(user, request, booking_id):
 
 
 def prepare_cancel_booking(user, booking_id):
-    print("=> Executing prepare_cancel_booking tool with booking_id:", booking_id)
+    logger.info(
+        "ai_tool_prepare_cancel_booking",
+        extra={"event": "ai_tool_prepare_cancel_booking", "user_id": user.id, "booking_id": booking_id}
+    )
     booking = (
         Booking.objects
         .select_related("event")

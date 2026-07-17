@@ -1,4 +1,3 @@
-import uuid
 from events.models import Event, Seat
 from payments.services import PaymentService
 from bookings.services import BookingService
@@ -69,7 +68,10 @@ def confirm_pending_booking(user):
         user=user,
         event=event,
         seat_ids=seat_ids,
-        idempotency_key=str(uuid.uuid4())
+        # Stable per pending-booking row, not random, so two racing confirm
+        # clicks against the same draft share one key instead of each minting
+        # its own — letting the idempotency lookup actually catch the second one.
+        idempotency_key=f"ai-confirm-{pending.id}"
     )
 
     pending.delete()

@@ -1,4 +1,6 @@
 import json
+import logging
+
 from openai import OpenAI
 from events.models import Event
 from django.utils import timezone
@@ -9,6 +11,8 @@ from ai_assistant.tools.registry import TOOL_REGISTRY
 from ai_assistant.actions.booking_actions import get_pending_booking_draft
 from ai_assistant.actions.payment_actions import get_pending_payment_retry_draft
 from ai_assistant.actions.cancellation_actions import get_pending_cancellation_draft
+
+logger = logging.getLogger(__name__)
 
 MAX_TOOL_CALLS = 5
 
@@ -201,8 +205,8 @@ class AIAssistantService:
                 tools=tools,
                 parallel_tool_calls=False
             )
-        except Exception as e:
-            print("OPENAI CALL FAILED:", str(e))
+        except Exception:
+            logger.exception("openai_call_failed")
             raise
 
 
@@ -280,7 +284,18 @@ class AIAssistantService:
                         cancellation_requested = True
                     if tool_name == "prepare_payment_retry" and "error" not in tool_result:
                         payment_retry_requested = True
+                except ValueError as e:
+                    # Expected business-rule rejection (bad booking id, wrong
+                    # status, etc.) — not a bug, so no error-level log needed.
+                    tool_result = {"error": str(e)}
                 except Exception as e:
+                    # Anything else is unexpected — log it so a real bug in a
+                    # tool function doesn't vanish behind the generic error
+                    # message the model sees.
+                    logger.exception(
+                        "ai_tool_call_failed",
+                        extra={"event": "ai_tool_call_failed", "tool_name": tool_name}
+                    )
                     tool_result = {"error": str(e)}
 
                 # Add the tool result to the conversation history
@@ -301,8 +316,8 @@ class AIAssistantService:
                     tools=tools,
                     parallel_tool_calls=False
                 )
-            except Exception as e:
-                print("SECOND OPENAI CALL FAILED:", str(e))
+            except Exception:
+                logger.exception("openai_followup_call_failed")
                 raise
 
         return (
