@@ -58,6 +58,10 @@ class PaymentService:
             if booking.expires_at and booking.expires_at < now:
                 booking.status = "EXPIRED"
                 booking.save(update_fields=["status", "updated_at"])
+                # unique_seat_claim only enforces uniqueness while
+                # is_active=True, so an expired booking releases its seats by
+                # flipping this flag rather than deleting the rows.
+                booking.booking_seats.update(is_active=False)
                 error_message = "Booking has expired"
                 logger.warning(
                     "payment_booking_expired",
@@ -72,6 +76,7 @@ class PaymentService:
             elif booking.retry_count >= PaymentService.MAX_RETRIES:
                 booking.status = "EXPIRED"
                 booking.save(update_fields=["status", "updated_at"])
+                booking.booking_seats.update(is_active=False)
                 error_message = "Retry limit exceeded"
                 logger.warning(
                     "payment_retry_limit_exceeded",
@@ -158,6 +163,9 @@ class PaymentService:
 
                 payment.save(update_fields=["status", "transaction_id", "updated_at"])
                 booking.save(update_fields=["status", "retry_count", "updated_at"])
+
+                if booking.status == "EXPIRED":
+                    booking.booking_seats.update(is_active=False)
 
                 if event_id_to_invalidate is not None:
                     transaction.on_commit(

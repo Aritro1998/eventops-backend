@@ -74,15 +74,25 @@ class EventService:
         else:
             queryset = queryset.order_by('start_time')  # Default ordering by start_time
 
-        # Annotate each event with confirmed booking count and derived available seats.
+        now = timezone.now()
+
+        # Same "taken" rule used everywhere else (BookingService's seat
+        # availability checks): CONFIRMED always blocks; PENDING/FAILED
+        # blocks only while its hold hasn't expired yet.
         return queryset.annotate(
-            confirmed_seats=Coalesce(
+            taken_seats=Coalesce(
                 Count(
-                    'seats__booking_seats', 
-                    filter=Q(seats__booking_seats__booking__status='CONFIRMED')
+                    'seats__booking_seats',
+                    filter=(
+                        Q(seats__booking_seats__booking__status='CONFIRMED') |
+                        Q(
+                            seats__booking_seats__booking__status__in=['PENDING', 'FAILED'],
+                            seats__booking_seats__booking__expires_at__gt=now,
+                        )
+                    )
                 ), 0
             ),
-            available_seats=F('total_seats') - F('confirmed_seats')
+            available_seats=F('total_seats') - F('taken_seats')
         )
         
     @staticmethod

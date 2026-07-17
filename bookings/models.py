@@ -59,19 +59,28 @@ class Booking(models.Model):
 class BookingSeat(models.Model):
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="booking_seats")
     seat = models.ForeignKey(Seat, on_delete=models.PROTECT, related_name="booking_seats")
-    
+    # True while this row represents a live claim on the seat. Flipped to
+    # False (never deleted) once the booking becomes CANCELLED/EXPIRED, so
+    # booking history keeps showing every seat a booking ever involved.
+    is_active = models.BooleanField(default=True)
+
     class Meta:
         constraints = [
             models.UniqueConstraint(
                 fields=['booking', 'seat'],
                 name='unique_seat_per_booking'
             ),
+            # Partial constraint: a seat can only have one *active* claim at
+            # a time. Postgres can't condition this on booking.status (a
+            # joined table's column), which is exactly why is_active exists
+            # here — a plain field on this same table the index can check.
             models.UniqueConstraint(
                 fields=['seat'],
+                condition=Q(is_active=True),
                 name='unique_seat_claim'
             )
         ]
-        
+
         indexes = [
             models.Index(fields=['booking']),
             models.Index(fields=['seat']),

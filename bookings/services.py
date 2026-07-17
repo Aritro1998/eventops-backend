@@ -326,11 +326,20 @@ class BookingService:
 
         if booking.status != "CONFIRMED":
             raise ValueError("Only CONFIRMED bookings can be CANCELLED.")
-        
+
         event_id = booking.event_id
 
-        booking.status = "CANCELLED"
-        booking.save(update_fields=["status", "updated_at"])
+        with transaction.atomic():
+            booking.status = "CANCELLED"
+            booking.save(update_fields=["status", "updated_at"])
+            # unique_seat_claim only enforces uniqueness while is_active=True,
+            # so a cancelled booking releases its seats by flipping this flag
+            # rather than deleting the rows — booking history still shows
+            # every seat this booking ever held.
+            booking.booking_seats.update(is_active=False)
+            transaction.on_commit(
+                lambda: BookingService.invalidate_event_cache(event_id)
+            )
 
         logger.info(
             "booking_cancelled",
@@ -341,10 +350,6 @@ class BookingService:
                 "event_id": booking.event_id,
                 "seat_ids": [booking_seat.seat_id for booking_seat in booking.booking_seats.all()],
             }
-        )
-
-        transaction.on_commit(   # ADDED
-            lambda: BookingService.invalidate_event_cache(event_id)
         )
 
         return booking

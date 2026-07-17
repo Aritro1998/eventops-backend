@@ -334,6 +334,11 @@ def handle_booking_expiry(job):
 
         booking.status = "EXPIRED"
         booking.save(update_fields=["status", "updated_at"])
+        # unique_seat_claim only enforces uniqueness while is_active=True, so
+        # an expired booking releases its seats by flipping this flag rather
+        # than deleting the rows.
+        booking.booking_seats.update(is_active=False)
+
         logger.info(
             "booking_expired",
             extra={
