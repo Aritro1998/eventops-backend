@@ -1,3 +1,4 @@
+import json
 import gradio as gr
 import requests
 from datetime import datetime
@@ -5,6 +6,7 @@ from html import escape
 
 
 DJANGO_API_URL = "http://web:8000/api/ai-assistant/chat/"
+DJANGO_STREAM_API_URL = "http://web:8000/api/ai-assistant/chat/stream/"
 CONFIRM_DRAFT_URL = (
     "http://web:8000/api/ai-assistant/actions/confirm-pending-booking/"
 )
@@ -448,24 +450,52 @@ def request_json(url, token=None, payload=None):
     return data
 
 
-def chat_with_ai(message, token, conversation_id):
+def stream_chat_with_ai(message, token, conversation_id):
+    """Yield ("chunk", text) as each piece of the reply arrives, then exactly
+    one ("done", event_dict) once the server signals the turn is finished, or
+    ("error", text) if the connection or the stream itself fails."""
     payload = {"message": message}
     if conversation_id:
         payload["conversation_id"] = conversation_id
 
-    data = request_json(DJANGO_API_URL, token=token, payload=payload)
-    if "error" in data:
-        # Keep the existing action panel visible after a transient chat failure.
-        return data["error"], conversation_id, None, None, None, None
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
-    return (
-        data.get("response", "Unknown error"),
-        data.get("conversation_id", conversation_id),
-        data.get("actions", []),
-        data.get("draft"),
-        data.get("cancellation"),
-        data.get("payment_retry"),
-    )
+    try:
+        response = requests.post(
+            DJANGO_STREAM_API_URL,
+            json=payload,
+            headers=headers,
+            stream=True,
+            timeout=60,
+        )
+    except requests.RequestException:
+        yield "error", "The service is unavailable. Please try again."
+        return
+
+    if not response.ok:
+        yield "error", "The service returned an error. Please try again."
+        return
+
+    # SSE frames the response as one "data: <json>" line per event followed
+    # by a blank line — iter_lines() hands us one line at a time, so we just
+    # skip anything that isn't a data line.
+    for line in response.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data: "):
+            continue
+
+        try:
+            event = json.loads(line[len("data: "):])
+        except ValueError:
+            continue
+
+        if event["type"] == "chunk":
+            yield "chunk", event["content"]
+        elif event["type"] == "done":
+            yield "done", event
+        elif event["type"] == "error":
+            yield "error", event.get("message", "Something went wrong.")
 
 
 def login(username, password):
@@ -578,29 +608,57 @@ def add_user_message(message, history):
 def get_ai_response(history, token, conversation_id, current_actions):
     # Nothing to do if add_user_message skipped an empty message.
     if not history or history[-1]["role"] != "user":
-        return history, conversation_id, *action_updates(current_actions)
+        yield history, conversation_id, *action_updates(current_actions)
+        return
 
     message = history[-1]["content"]
-    response, conversation_id, actions, draft, cancellation, payment_retry = chat_with_ai(
-        message,
-        token,
-        conversation_id,
-    )
-    if draft:
-        content = render_draft_card(draft)
-    elif cancellation:
-        content = render_cancel_prepare_card(cancellation)
-    elif payment_retry:
-        content = render_payment_retry_prepare_card(payment_retry)
-    else:
-        content = response
-    history = history + [{"role": "assistant", "content": content}]
 
+    # Start the assistant's bubble empty; each streamed chunk grows it in
+    # place, so re-yielding the same list (with this last entry mutated) is
+    # what makes the reply visibly type itself out instead of appearing whole.
+    history = history + [{"role": "assistant", "content": ""}]
+    accumulated_text = ""
+    final_event = None
+
+    for event_type, payload in stream_chat_with_ai(message, token, conversation_id):
+        if event_type == "chunk":
+            accumulated_text += payload
+            history[-1]["content"] = accumulated_text
+            yield history, conversation_id, *action_updates(current_actions)
+        elif event_type == "done":
+            final_event = payload
+        elif event_type == "error":
+            history[-1]["content"] = payload
+            yield history, conversation_id, *action_updates(current_actions)
+            return
+
+    if final_event is None:
+        # Connection dropped mid-stream with no "done" event at all — keep
+        # whatever text did arrive rather than losing it silently.
+        yield history, conversation_id, *action_updates(current_actions)
+        return
+
+    conversation_id = final_event.get("conversation_id", conversation_id)
+    actions = final_event.get("actions")
     # Keep draft controls visible when the chat request itself failed.
     if actions is None:
         actions = current_actions
 
-    return history, conversation_id, *action_updates(actions)
+    draft = final_event.get("draft")
+    cancellation = final_event.get("cancellation")
+    payment_retry = final_event.get("payment_retry")
+
+    # Same rule as before streaming existed: when a draft/cancellation/retry
+    # was staged this turn, its card replaces the plain text — it's just
+    # that here, the plain text was already visibly streamed in first.
+    if draft:
+        history[-1]["content"] = render_draft_card(draft)
+    elif cancellation:
+        history[-1]["content"] = render_cancel_prepare_card(cancellation)
+    elif payment_retry:
+        history[-1]["content"] = render_payment_retry_prepare_card(payment_retry)
+
+    yield history, conversation_id, *action_updates(actions)
 
 
 def run_draft_action(url, token, history, current_actions, conversation_id, action_label):

@@ -1,15 +1,14 @@
+import json
 import logging
-
 from .chat_state import ChatState
 from rest_framework import status
 from rest_framework.views import APIView
 from .services import AIAssistantService
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import APIException
 from core.throttles import BookingThrottle
-
-logger = logging.getLogger(__name__)
+from rest_framework.response import Response
+from django.http import StreamingHttpResponse
+from rest_framework.exceptions import APIException
+from rest_framework.permissions import IsAuthenticated
 
 from .actions.booking_actions import (
     confirm_pending_booking,
@@ -29,6 +28,8 @@ from .actions.payment_actions import (
     get_pending_payment_retry_actions,
 )
 
+
+logger = logging.getLogger(__name__)
 
 
 def persist_action_outcome(request, response_text):
@@ -120,6 +121,55 @@ class ChatView(APIView):
                 {'error': 'Failed to get AI response'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class ChatStreamView(APIView):
+    def post(self, request):
+        user_prompt = request.data.get('message', '').strip()
+        conversation_id = request.data.get('conversation_id')
+        
+        if not user_prompt:
+            return Response(
+                {'error': 'Message is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Deliberately done here, outside the generator below: if the
+        # conversation_id is invalid/expired, ChatState.get raises a DRF
+        # exception that the normal view machinery turns into a clean 400/403
+        # response. Once we're inside the streaming generator, the HTTP
+        # headers are already committed — errors there can't cleanly become
+        # a different status code anymore.
+        if conversation_id:
+            conversation_id, chat_state = ChatState.get(conversation_id, user=request.user)
+        else:
+            conversation_id, chat_state = ChatState.create(user=request.user)
+            
+        def event_stream():
+            ai_service = AIAssistantService()
+            try:
+                for event in ai_service.chat_stream(
+                    user_prompt,
+                    user=request.user,
+                    request=request,
+                    conversation_id=conversation_id,
+                    chat_state=chat_state,
+                ):
+                    if event["type"] == "done":
+                        event["conversation_id"] = conversation_id
+                        event["actions"] = (
+                            get_all_pending_actions(request.user)
+                            if request.user.is_authenticated else []
+                        )
+                    
+                    yield f"data: {json.dumps(event)}\n\n"
+            except Exception:
+                logger.exception("chat_stream_failed")
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to get AI response'})}\n\n"
+
+        response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+        response["Cache-Control"] = "no-cache"
+        return response
 
 
 class ConfirmPendingBookingActionView(APIView):

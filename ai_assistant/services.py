@@ -101,7 +101,8 @@ def get_system_prompt(user=None, request=None, chat_state=None):
 
         When a booking request is made:
         1. Use search_events if needed.
-        2. Use get_available_seats. Don't print the seats as a list, use a grid format (10 columns and N rows).
+        2. Use get_available_seats. Don't print the seats as a list.
+        You must use a grid format (10 columns and N rows) to display the available seats.
         3. Ask the user which seats they want. Pass seat numbers to prepare_booking.
         4. Call prepare_booking.
         5. Show the booking summary.
@@ -174,6 +175,54 @@ def get_system_prompt(user=None, request=None, chat_state=None):
 class AIAssistantService:
     def __init__(self):
         self.client = OpenAI(api_key=OPENAI_API_KEY)
+        
+    def _run_tool(self, tool_name, args, user, request, conversation_id, chat_state):
+        """Execute one tool call. Shared by chat() and chat_stream() so the
+        auth/kwargs/error-handling rules live in exactly one place.
+
+        Returns (tool_result_dict, flag_name_or_None) — the flag tells the
+        caller which "something was staged" flag to flip, if any.
+        """
+        tool_config = TOOL_REGISTRY.get(tool_name)
+
+        if not tool_config:
+            return {"error": "Tool not found"}, None
+
+        require_auth = tool_config.get("requires_auth", False)
+        if require_auth and not user.is_authenticated:
+            return {"error": "Authentication required"}, None
+
+        kwargs = dict(args)
+        if require_auth:
+            kwargs["user"] = user
+        if tool_config.get("requires_request"):
+            kwargs["request"] = request
+        if tool_config.get("requires_chat_state"):
+            kwargs["conversation_id"] = conversation_id
+            kwargs["chat_state"] = chat_state
+
+        tool_function = tool_config["function"]
+        flag_set = None
+
+        try:
+            tool_result = tool_function(**kwargs)
+            if "error" not in tool_result:
+                if tool_name == "prepare_booking":
+                    flag_set = "booking_drafted"
+                elif tool_name == "prepare_cancel_booking":
+                    flag_set = "cancellation_requested"
+                elif tool_name == "prepare_payment_retry":
+                    flag_set = "payment_retry_requested"
+        except ValueError as e:
+            tool_result = {"error": str(e)}
+        except Exception as e:
+            logger.exception(
+                "ai_tool_call_failed",
+                extra={"event": "ai_tool_call_failed", "tool_name": tool_name}
+            )
+            tool_result = {"error": str(e)}
+
+        return tool_result, flag_set
 
     def chat(self, user_prompt, user=None, request=None, conversation_id=None, chat_state=None):
         # 1. Create the system prompt
@@ -232,71 +281,20 @@ class AIAssistantService:
                 return message.content, draft, cancellation, payment_retry
 
             messages.append(message)
-            # Loop through the tool calls
             for tool_call in message.tool_calls:
                 tool_name = tool_call.function.name
                 args = json.loads(tool_call.function.arguments)
-                tool_config = TOOL_REGISTRY.get(tool_name)
-
-                if not tool_config:
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps({"error": "Tool not found"})
-                        }
-                    )
-                    continue
-
-                tool_function = tool_config["function"]
-                require_auth = tool_config.get("requires_auth", False)
-                # If the tool requires authentication and the user is not authenticated, return an error
-                if require_auth and not user.is_authenticated:
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps({"error": "Authentication required"})
-                        }
-                    )
-                    continue
-
-                # Create the kwargs for the tool
-                kwargs = dict(args)
-
-                if require_auth:
-                    kwargs["user"] = user
-
-                if tool_config.get("requires_request"):
-                    kwargs["request"] = request
-
-                if tool_config.get("requires_chat_state"):
-                    # State is server-owned, so a model cannot supply or alter
-                    # another conversation ID through tool arguments.
-                    kwargs["conversation_id"] = conversation_id
-                    kwargs["chat_state"] = chat_state
-
-                try:
-                    tool_result = tool_function(**kwargs)
-                    if tool_name == "prepare_booking" and "error" not in tool_result:
-                        booking_drafted = True
-                    if tool_name == "prepare_cancel_booking" and "error" not in tool_result:
-                        cancellation_requested = True
-                    if tool_name == "prepare_payment_retry" and "error" not in tool_result:
-                        payment_retry_requested = True
-                except ValueError as e:
-                    # Expected business-rule rejection (bad booking id, wrong
-                    # status, etc.) — not a bug, so no error-level log needed.
-                    tool_result = {"error": str(e)}
-                except Exception as e:
-                    # Anything else is unexpected — log it so a real bug in a
-                    # tool function doesn't vanish behind the generic error
-                    # message the model sees.
-                    logger.exception(
-                        "ai_tool_call_failed",
-                        extra={"event": "ai_tool_call_failed", "tool_name": tool_name}
-                    )
-                    tool_result = {"error": str(e)}
+                
+                tool_result, flag_set = self._run_tool(
+                    tool_name, args, user, request, conversation_id, chat_state
+                )
+                
+                if flag_set == "booking_drafted":
+                    booking_drafted = True
+                elif flag_set == "cancellation_requested":
+                    cancellation_requested = True
+                elif flag_set == "payment_retry_requested":
+                    payment_retry_requested = True
 
                 # Add the tool result to the conversation history
                 messages.append(
@@ -324,3 +322,139 @@ class AIAssistantService:
             "[MAX_TOOL_CALLS_EXCEEDED] Sorry, I unfortunately I was unable to complete that request. "
             "Please try again later."
         ), None, None, None
+        
+    def chat_stream(self, user_prompt, user=None, request=None, conversation_id=None, chat_state=None):
+        """
+        Conversation loop that yields pieces as they arrive instead of returning one finished answer.
+        """
+        messages = [
+            {
+                "role": "system",
+                "content": get_system_prompt(
+                    user=user, 
+                    request=request,
+                    chat_state=chat_state,
+                ),
+            },
+            *chat_state["history"],
+            {"role": "user", "content": user_prompt},
+        ]
+        
+        tools = [tool_config["schema"] for tool_config in TOOL_REGISTRY.values()]
+        
+        booking_drafted = False
+        cancellation_requested = False
+        payment_retry_requested = False
+        full_text = ""
+        
+        for _ in range(MAX_TOOL_CALLS):
+            try:
+                stream = self.client.chat.completions.create(
+                    model='gpt-4o-mini',
+                    messages=messages,
+                    temperature=0.3,
+                    tools=tools,
+                    parallel_tool_calls=False,
+                    stream=True
+                )
+            except Exception:
+                logger.exception("openai_call_failed")
+                raise
+            
+            content_buffer = ""
+            # Tool-call fragments arrive by index (0, 1, ...) across many
+            # chunks — id/name/arguments each get built up piece by piece.
+            tool_calls_by_index = {}
+            
+            for chunk in stream:
+                delta = chunk.choices[0].delta
+                
+                if delta.content:
+                    content_buffer += delta.content
+                    full_text += delta.content
+                    # This is the actual "streaming" moment — hand this
+                    # fragment to the view immediately, don't wait.
+                    yield {"type": "chunk", "content": delta.content}
+                    
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        entry = tool_calls_by_index.setdefault(
+                            tc_delta.index,
+                            {"id": None, "name": "", "arguments": ""}
+                        )
+                        
+                        if tc_delta.id:
+                            entry["id"] = tc_delta.id
+                        if tc_delta.function and tc_delta.function.name:
+                            entry["name"] += tc_delta.function.name
+                        if tc_delta.function and tc_delta.function.arguments:
+                            entry["arguments"] += tc_delta.function.arguments
+            
+            if not tool_calls_by_index:
+                # Plain-text answer — every piece was already streamed above.
+                # This is just the wrap-up: save history, report what to show.
+                ChatState.add_turn(chat_state, "user", user_prompt)
+                ChatState.add_turn(chat_state, "assistant", full_text)
+                ChatState.save(conversation_id, chat_state)
+                
+                yield {
+                    "type": "done",
+                    "draft": get_pending_booking_draft(user) if booking_drafted else None,
+                    "cancellation": get_pending_cancellation_draft(user) if cancellation_requested else None,
+                    "payment_retry": get_pending_payment_retry_draft(user) if payment_retry_requested else None
+                } 
+                return
+            
+            # Otherwise, one or more tools were requested. Rebuild the
+            # assistant message OpenAI expects to see next, then run the tools
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": content_buffer or None,
+                    "tool_calls": [
+                        {
+                            "id": entry["id"],
+                            "type": "function",
+                            "function": {
+                                "name": entry["name"],
+                                "arguments": entry["arguments"]
+                            }
+                        }
+                        for entry in tool_calls_by_index.values()
+                    ]
+                }
+            )
+            
+            for entry in tool_calls_by_index.values():
+                args = json.loads(entry["arguments"])
+                tool_result, flag_set = self._run_tool(
+                    entry["name"],
+                    args,
+                    user,
+                    request,
+                    conversation_id,
+                    chat_state
+                )
+                
+                if flag_set == "booking_drafted":
+                    booking_drafted = True
+                elif flag_set == "cancellation_requested":
+                    cancellation_requested = True
+                elif flag_set == "payment_retry_requested":
+                    payment_retry_requested = True
+                    
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": entry["id"],
+                        "content": json.dumps(tool_result)
+                    }
+                )
+
+        # Ran out of tool-call rounds without a plain-text answer.
+        fallback_message = (
+            "[MAX_TOOL_CALLS_EXCEEDED] Sorry, I unfortunately I was unable to "
+            "complete that request. Please try again later."
+        )
+        yield {"type": "chunk", "content": fallback_message}
+        yield {"type": "done", "draft": None, "cancellation": None, "payment_retry": None}
