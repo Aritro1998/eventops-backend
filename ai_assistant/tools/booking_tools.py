@@ -4,7 +4,7 @@ from events.services import EventService
 from bookings.services import BookingService
 from payments.services import PaymentService
 from bookings.serializers import BookingReadSerializer
-from ai_assistant.models import PendingBooking, get_pending_booking_expiry
+from ai_assistant.models import PendingBooking, get_pending_booking_expiry, PendingBookingCancellation
 
 
 def get_my_bookings(user, status=None):
@@ -104,11 +104,11 @@ def retry_payment(user, request, booking_id):
     return serializer.data
 
 
-def cancel_booking(user, booking_id):
-    print("=> Executing cancel_booking tool with booking_id:", booking_id)
+def prepare_cancel_booking(user, booking_id):
+    print("=> Executing prepare_cancel_booking tool with booking_id:", booking_id)
     booking = (
         Booking.objects
-        .select_related("event", "payment")
+        .select_related("event")
         .prefetch_related("booking_seats__seat")
         .filter(id=booking_id, user=user)
         .first()
@@ -116,8 +116,22 @@ def cancel_booking(user, booking_id):
 
     if not booking:
         raise ValueError("Booking not found.")
+    
+    if booking.status != "CONFIRMED":
+        raise ValueError("Only CONFIRMED bookings can be cancelled.")
 
-    # BookingService permits cancellation only for CONFIRMED bookings.
-    booking = BookingService.cancel_booking(booking)
+    # Stage the request — this does NOT cancel anything. The real cancellation
+    # only happens if the user clicks "Confirm Cancellation", which hits a
+    # dedicated endpoint (see ConfirmCancellationActionView), never this tool.
+    PendingBookingCancellation.objects.update_or_create(
+        user=user,
+        defaults={"booking": booking},
+    )
 
-    return BookingReadSerializer(booking).data
+    return {
+        "booking_id": booking.id,
+        "event_name": booking.event.name,
+        "seat_numbers": [bs.seat.seat_number for bs in booking.booking_seats.all()],
+        "amount": str(booking.amount),
+        "status": "awaiting_cancellation_confirmation",
+    }

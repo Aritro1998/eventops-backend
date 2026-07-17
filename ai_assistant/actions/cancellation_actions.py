@@ -1,0 +1,102 @@
+from ai_assistant.models import PendingBooking, PendingBookingCancellation
+from bookings.services import BookingService
+
+
+def get_pending_cancellation_actions(user):
+    """Return UI actions only when the user has a booking staged for cancellation."""
+    
+    pending = PendingBookingCancellation.objects.filter(user=user).first()
+    
+    if not pending:
+        return []
+    
+    return [
+        {"type": "confirm_cancel_booking", "label": "Confirm Cancellation"},
+        {"type": "keep_booking", "label": "Keep Booking"},
+    ]
+    
+
+def get_pending_cancellation_draft(user):
+    """Return the staged cancellation's details for rendering, or None."""
+    
+    pending = (
+        PendingBookingCancellation.objects
+        .select_related("booking__event")
+        .prefetch_related("booking__booking_seats__seat")
+        .filter(user=user)
+        .first()
+    )
+    
+    if not pending:
+        return None
+    
+    booking = pending.booking
+    return {
+        "booking_id": booking.id,
+        "event_name": booking.event.name,
+        "seat_numbers": [bs.seat.seat_number for bs in booking.booking_seats.all()],
+        "amount": str(booking.amount),
+        "event_start_time": booking.event.start_time.isoformat(),
+    }
+    
+    
+def confirm_cancellation(user):
+    """Actually cancel the booking the user staged for cancellation."""
+    
+    pending = (
+        PendingBookingCancellation.objects
+        .select_related("booking__event")
+        .prefetch_related("booking__booking_seats__seat")
+        .filter(user=user)
+        .first()
+    )
+    
+    if not pending:
+        raise ValueError("No pending cancellation found")
+    
+    booking = pending.booking
+    seat_numbers = [bs.seat.seat_number for bs in booking.booking_seats.all()]
+    
+    # This raises ValueError if the booking is no longer CONFIRMED (e.g. it
+    # expired or was already cancelled through another path since staging) —
+    # that's the re-validation this design relies on instead of an expiry field.
+    booking = BookingService.cancel_booking(booking)
+    
+    pending.delete()
+    
+    return{
+        "booking_id": booking.id,
+        "event_name": booking.event.name,
+        "seat_numbers": seat_numbers,
+        "status": booking.status,  # "CANCELLED"
+        "amount": str(booking.amount),
+        "event_start_time": booking.event.start_time.isoformat(),
+    }
+    
+    
+def dismiss_cancellation(user):
+    """Back out of a staged cancellation — the booking is untouched."""
+    
+    pending = (
+        PendingBookingCancellation.objects
+        .select_related("booking__event")
+        .prefetch_related("booking__booking_seats__seat")
+        .filter(user=user)
+        .first()
+    )
+    
+    if not pending:
+        raise ValueError("No pending cancellation found")
+    
+    booking = pending.booking
+    seat_numbers = [bs.seat.seat_number for bs in booking.booking_seats.all()]
+    pending.delete()
+    
+    return {
+        "booking_id": booking.id,
+        "event_name": booking.event.name,
+        "seat_numbers": seat_numbers,
+        "status": "KEPT",  # not a real Booking status — see note below
+        "amount": str(booking.amount),
+        "event_start_time": booking.event.start_time.isoformat(),
+    }

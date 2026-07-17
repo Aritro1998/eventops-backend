@@ -1,16 +1,17 @@
 import json
-
 from openai import OpenAI
+from events.models import Event
 from django.utils import timezone
-
-from ai_assistant.booking_actions import get_pending_booking_draft
+from core.settings.base import OPENAI_API_KEY
 from ai_assistant.chat_state import ChatState
 from ai_assistant.models import PendingBooking
-from core.settings.base import OPENAI_API_KEY
-from events.models import Event
 from ai_assistant.tools.registry import TOOL_REGISTRY
+from ai_assistant.actions.booking_actions import get_pending_booking_draft
+from ai_assistant.actions.cancellation_actions import get_pending_cancellation_draft
+
 
 MAX_TOOL_CALLS = 5
+
 
 def get_system_prompt(user=None, request=None, chat_state=None):
     now = timezone.localtime()
@@ -72,10 +73,20 @@ def get_system_prompt(user=None, request=None, chat_state=None):
     system_prompt = f"""
         You are an assistant for EventOps platform.
         Answer user queries about events, bookings, and payments in a helpful and concise manner.
-        Only provide information that is relevant to the user's query. If you don't know the answer, say you don't know instead of making something up.
+        Only provide information that is relevant to the user's query. 
+        If you don't know the answer, say you don't know instead of making something up.
+        
+        When showing more than one item (multiple bookings, multiple events, or
+        search results), always format them as a Markdown table — one row per
+        item, with columns for the fields relevant to that data (e.g. Event, Seat,
+        Amount, Status, Booking ID for bookings). Never use a numbered list with
+        bold field labels for multi-item results. A single item can still be
+        described in plain sentences.
 
-        When a user refers to an event by name rather than id, use the available tools to discover the event id. Do not ask the user for internal ids if they can be found using tools.
-        Always use available tools to retrieve the correct identifier before performing actions or answering questions that depend on those identifiers.
+        When a user refers to an event by name rather than id, use the available tools to discover the event id. 
+        Do not ask the user for internal ids if they can be found using tools.
+        Always use available tools to retrieve the correct identifier before performing actions or 
+        answering questions that depend on those identifiers.
 
         If multiple events with similar names are found, ask the user to clarify which event they mean before proceeding.
 
@@ -99,9 +110,14 @@ def get_system_prompt(user=None, request=None, chat_state=None):
         3. Never retry payment for a booking unless it belongs to the current authenticated user.
 
         When the user asks to cancel a confirmed booking:
-        1. If the booking ID is known and the request is clear, call cancel_booking.
+        1. If the booking ID is known and the request is clear, call prepare_cancel_booking.
         2. If it is unknown, call get_my_bookings with status CONFIRMED and ask the user which booking to cancel.
-        3. For an unconfirmed draft, direct the user to the displayed Cancel draft control.
+        3. If more than one booking could match (e.g. two bookings for the same
+           event), list seat number and booking id for each match and ask the
+           user to pick — never guess which one they mean.
+        4. Never claim the booking was cancelled — only a click on the displayed
+           Confirm Cancellation control actually cancels it.
+        5. For an unconfirmed draft, direct the user to the displayed Cancel draft control.
 
         If a tool result contains an error field:
         - Explain the error clearly to the user.
@@ -171,6 +187,7 @@ class AIAssistantService:
 
         # 4. Make the tool calls
         booking_drafted = False
+        cancellation_requested = False
         for _ in range(MAX_TOOL_CALLS):
             message = response.choices[0].message
             # If there are no tool calls, add the turn and return the response
@@ -184,7 +201,8 @@ class AIAssistantService:
                 # Only surface a draft card on the turn that actually created
                 # or updated it, not on every later unrelated message.
                 draft = get_pending_booking_draft(user) if booking_drafted else None
-                return message.content, draft
+                cancellation = get_pending_cancellation_draft(user) if cancellation_requested else None
+                return message.content, draft, cancellation
 
             messages.append(message)
             # Loop through the tool calls
@@ -235,6 +253,8 @@ class AIAssistantService:
                     tool_result = tool_function(**kwargs)
                     if tool_name == "prepare_booking" and "error" not in tool_result:
                         booking_drafted = True
+                    if tool_name == "prepare_cancel_booking" and "error" not in tool_result:
+                        cancellation_requested = True
                 except Exception as e:
                     tool_result = {"error": str(e)}
 
@@ -263,4 +283,4 @@ class AIAssistantService:
         return (
             "[MAX_TOOL_CALLS_EXCEEDED] Sorry, I unfortunately I was unable to complete that request. "
             "Please try again later."
-        ), None
+        ), None, None

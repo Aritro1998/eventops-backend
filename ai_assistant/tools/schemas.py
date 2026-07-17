@@ -201,24 +201,33 @@ RETRY_PAYMENT_TOOL = {
 }
 
 
-CANCEL_BOOKING_TOOL = {
+PREPARE_CANCEL_BOOKING_TOOL = {
     "type": "function",
     "function": {
-        "name": "cancel_booking",
+        "name": "prepare_cancel_booking",
         "description": (
-            "Cancel one of the authenticated user's confirmed bookings. "
-            "Use only after a clear cancellation request. "
-            "If the booking ID is unknown, call get_my_bookings first."
+            "Stage the cancellation of one of the authenticated user's CONFIRMED "
+            "bookings. This does NOT cancel the booking — it only prepares it for "
+            "confirmation. After this tool succeeds, tell the user to use the "
+            "displayed Confirm Cancellation or Keep Booking controls. Never say "
+            "the booking was cancelled unless a backend tool result confirms it. "
+            "If the booking ID is unknown, call get_my_bookings with status "
+            "CONFIRMED first. If more than one booking matches what the user "
+            "described (e.g. two bookings for the same event), list the "
+            "distinguishing details — seat number and booking id — for each "
+            "match and ask the user to pick one. Never guess or default to the "
+            "most recent match."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "booking_id": {
                     "type": "integer",
-                    "description": "The confirmed booking ID to cancel."
+                    "description": "The confirmed booking ID to stage for cancellation."
                 }
             },
             "required": ["booking_id"]
         }
     }
 }
+

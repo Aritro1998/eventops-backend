@@ -11,6 +11,12 @@ CONFIRM_DRAFT_URL = (
 CANCEL_DRAFT_URL = (
     "http://web:8000/api/ai-assistant/actions/cancel-pending-booking/"
 )
+CONFIRM_CANCEL_URL = (
+    "http://web:8000/api/ai-assistant/actions/confirm-cancel-booking/"
+)
+KEEP_BOOKING_URL = (
+    "http://web:8000/api/ai-assistant/actions/keep-booking/"
+)
 DJANGO_LOGIN_URL = "http://web:8000/api/auth/token/"
 DJANGO_REGISTER_URL = "http://web:8000/api/auth/register/"
 
@@ -257,20 +263,28 @@ def render_status_card(icon, accent, title, subtitle, rows):
     )
 
 
+# Maps a booking's status to how its card looks. "KEPT" isn't a real Django
+# Booking status (see bookings/models.py) — it's a value dismiss_cancellation()
+# invents so a "kept my booking" outcome can reuse this same card/renderer
+# instead of a separate code path.
+BOOKING_STATUS_CARD_STYLES = {
+    "CONFIRMED": ("&#10003;", "#16a34a", "Booking Confirmed", "Your booking has been successfully confirmed."),
+    "CANCELLED": ("&#10005;", "#dc2626", "Booking Cancelled", "This booking has been cancelled."),
+    "KEPT": ("&#10003;", "#16a34a", "Booking Kept", "Your booking was not cancelled."),
+}
+
+
 def render_booking_card(booking):
-    is_confirmed = booking.get("status") == "CONFIRMED"
+    status = booking.get("status", "")
     seats = ", ".join(str(s) for s in booking.get("seat_numbers", []))
 
-    icon, title, subtitle = (
-        ("&#10003;", "Booking Confirmed", "Your booking has been successfully confirmed.")
-        if is_confirmed
-        else (
-            "&#8987;",
-            "Booking Pending",
-            f"Your booking was created with status {escape(booking.get('status', ''))}.",
-        )
-    )
-    accent = "#16a34a" if is_confirmed else "#d97706"
+    if status in BOOKING_STATUS_CARD_STYLES:
+        icon, accent, title, subtitle = BOOKING_STATUS_CARD_STYLES[status]
+    else:
+        # Anything else (FAILED, EXPIRED, ...) falls back to a generic
+        # "still pending" style rather than needing an entry per status.
+        icon, accent, title = "&#8987;", "#d97706", "Booking Pending"
+        subtitle = f"Your booking was created with status {escape(status)}."
 
     rows = [
         ("Event", escape(booking.get("event_name", ""))),
@@ -295,6 +309,28 @@ def render_draft_card(draft):
         "var(--color-accent)",
         "Booking Draft",
         "Review the details, then confirm or cancel below.",
+        rows,
+    )
+
+
+def render_cancel_prepare_card(cancellation):
+    # Shown when the AI stages a cancellation (prepare_cancel_booking ran this
+    # turn). Unlike render_draft_card, this includes the Booking ID — that's
+    # the detail a user checks to catch the AI staging the wrong one of their
+    # bookings (e.g. two bookings for the same event) before clicking confirm.
+    seats = ", ".join(str(s) for s in cancellation.get("seat_numbers", []))
+    rows = [
+        ("Event", escape(cancellation.get("event_name", ""))),
+        ("Seat", escape(seats)),
+        ("Time", escape(format_event_time(cancellation.get("event_start_time", "")))),
+        ("Amount", f"₹{escape(cancellation.get('amount', ''))}"),
+        ("Booking ID", escape(str(cancellation.get("booking_id", "")))),
+    ]
+    return render_status_card(
+        "&#9888;",
+        "#d97706",
+        "Cancel This Booking?",
+        "Review the details, then confirm the cancellation or keep your booking below.",
         rows,
     )
 
@@ -360,13 +396,14 @@ def chat_with_ai(message, token, conversation_id):
     data = request_json(DJANGO_API_URL, token=token, payload=payload)
     if "error" in data:
         # Keep the existing action panel visible after a transient chat failure.
-        return data["error"], conversation_id, None, None
+        return data["error"], conversation_id, None, None, None
 
     return (
         data.get("response", "Unknown error"),
         data.get("conversation_id", conversation_id),
         data.get("actions", []),
         data.get("draft"),
+        data.get("cancellation"),
     )
 
 
@@ -430,14 +467,24 @@ def register(username, email, password):
 
 
 def action_updates(actions):
+    # Two independent action "families" can appear in the same list at once —
+    # e.g. a leftover seat draft AND a staged cancellation are unrelated and
+    # can coexist — so each row's visibility is computed from its own action
+    # types instead of treating the whole list as one mutually-exclusive state.
     action_types = {action["type"] for action in actions}
-    has_actions = bool(actions)
+    has_draft_actions = bool({"confirm_pending_booking", "cancel_pending_booking"} & action_types)
+    has_cancel_actions = bool({"confirm_cancel_booking", "keep_booking"} & action_types)
+
     return (
         actions,
-        gr.update(visible=has_actions),
+        gr.update(visible=has_draft_actions),
         gr.update(visible="confirm_pending_booking" in action_types),
         gr.update(visible="cancel_pending_booking" in action_types),
-        gr.update(visible=not has_actions),
+        gr.update(visible=has_cancel_actions),
+        gr.update(visible="confirm_cancel_booking" in action_types),
+        gr.update(visible="keep_booking" in action_types),
+        # Hide the composer whenever anything is pending, not just drafts.
+        gr.update(visible=not actions),
     )
 
 
@@ -468,12 +515,17 @@ def get_ai_response(history, token, conversation_id, current_actions):
         return history, conversation_id, *action_updates(current_actions)
 
     message = history[-1]["content"]
-    response, conversation_id, actions, draft = chat_with_ai(
+    response, conversation_id, actions, draft, cancellation = chat_with_ai(
         message,
         token,
         conversation_id,
     )
-    content = render_draft_card(draft) if draft else response
+    if draft:
+        content = render_draft_card(draft)
+    elif cancellation:
+        content = render_cancel_prepare_card(cancellation)
+    else:
+        content = response
     history = history + [{"role": "assistant", "content": content}]
 
     # Keep draft controls visible when the chat request itself failed.
@@ -560,6 +612,13 @@ with gr.Blocks(
                 confirm_draft_btn = gr.Button("Confirm booking", variant="primary", visible=False)
                 cancel_draft_btn = gr.Button("Cancel draft", variant="secondary", visible=False)
 
+            # Separate row from action_row on purpose: a seat draft and a
+            # staged cancellation are unrelated and can both be pending at
+            # once (see action_updates), so each needs its own visibility.
+            with gr.Row(visible=False, elem_classes=["draft-actions"]) as cancellation_row:
+                confirm_cancel_btn = gr.Button("Confirm Cancellation", variant="stop", visible=False)
+                keep_booking_btn = gr.Button("Keep Booking", variant="secondary", visible=False)
+
             with gr.Row(elem_classes=["composer"]) as composer_row:
                 msg = gr.Textbox(
                     placeholder="Ask about events...",
@@ -591,6 +650,9 @@ with gr.Blocks(
             action_row,
             confirm_draft_btn,
             cancel_draft_btn,
+            cancellation_row,
+            confirm_cancel_btn,
+            keep_booking_btn,
             composer_row,
         ],
     )
@@ -603,6 +665,9 @@ with gr.Blocks(
         action_row,
         confirm_draft_btn,
         cancel_draft_btn,
+        cancellation_row,
+        confirm_cancel_btn,
+        keep_booking_btn,
         composer_row,
     ]
     send_btn.click(
@@ -619,6 +684,9 @@ with gr.Blocks(
         action_row,
         confirm_draft_btn,
         cancel_draft_btn,
+        cancellation_row,
+        confirm_cancel_btn,
+        keep_booking_btn,
         composer_row,
     ]
     confirm_draft_btn.click(
@@ -641,6 +709,30 @@ with gr.Blocks(
             actions,
             conversation_id,
             "Cancel draft",
+        ),
+        inputs=action_inputs,
+        outputs=action_outputs,
+    )
+    confirm_cancel_btn.click(
+        fn=lambda token, history, actions, conversation_id: run_draft_action(
+            CONFIRM_CANCEL_URL,
+            token,
+            history,
+            actions,
+            conversation_id,
+            "Confirm Cancellation",
+        ),
+        inputs=action_inputs,
+        outputs=action_outputs,
+    )
+    keep_booking_btn.click(
+        fn=lambda token, history, actions, conversation_id: run_draft_action(
+            KEEP_BOOKING_URL,
+            token,
+            history,
+            actions,
+            conversation_id,
+            "Keep Booking",
         ),
         inputs=action_inputs,
         outputs=action_outputs,

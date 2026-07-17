@@ -1,3 +1,5 @@
+import logging
+
 from .chat_state import ChatState
 from rest_framework import status
 from rest_framework.views import APIView
@@ -7,10 +9,18 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import APIException
 from core.throttles import BookingThrottle
 
-from .booking_actions import (
-    cancel_pending_booking_draft,
+logger = logging.getLogger(__name__)
+
+from .actions.booking_actions import (
     confirm_pending_booking,
     get_pending_booking_actions,
+    cancel_pending_booking_draft,
+)
+
+from .actions.cancellation_actions import (
+    confirm_cancellation,
+    dismiss_cancellation,
+    get_pending_cancellation_actions,
 )
 
 
@@ -55,24 +65,36 @@ class ChatView(APIView):
 
         try:
             ai_service = AIAssistantService()
-            response, draft = ai_service.chat(
+            response, draft, cancellation = ai_service.chat(
                 user_prompt,
                 user=request.user,
                 request=request,
                 conversation_id=conversation_id,
                 chat_state=chat_state
             )
+            
+            actions = []
+            if request.user.is_authenticated:
+                # Both lists can be non-empty at once — e.g. a leftover seat
+                # draft AND a staged cancellation are unrelated and can coexist.
+                actions = get_pending_booking_actions(request.user) + get_pending_cancellation_actions(request.user)
 
             return Response(
                 {
                     'response': response,
                     'conversation_id': conversation_id,
-                    'actions': get_pending_booking_actions(request.user) if request.user.is_authenticated else [],
+                    'actions': actions,
                     'draft': draft,
+                    'cancellation': cancellation
                 }
             )
 
-        except Exception as e:
+        except Exception:
+            # The client only ever sees the generic message below (never leak
+            # internals to an API response) — but without this log line, every
+            # 500 here looks identical in `docker logs` regardless of cause,
+            # which is exactly what made this bug hard to diagnose.
+            logger.exception("chat_view_failed")
             return Response(
                 {'error': 'Failed to get AI response'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -137,3 +159,62 @@ class CancelPendingBookingActionView(APIView):
                 "actions": []
             }
         )
+        
+        
+class ConfirmCancellationActionView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [BookingThrottle]
+    
+    def post(self, request):
+        try:
+            booking = confirm_cancellation(request.user)
+        except ValueError as error:
+            return Response(
+                {"detail": str(error)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        response_text = (
+            f"Your booking for {booking['event_name']} has been cancelled. "
+            f"Booking ID: {booking['booking_id']}."
+        )
+        
+        persist_action_outcome(request, response_text)
+        
+        return Response(
+            {
+                "response": response_text,
+                # Reusing the "booking" key on purpose, same as
+                # ConfirmPendingBookingActionView — the frontend's card
+                # renderer already knows how to display any dict shaped
+                # like a booking, it just switches on booking["status"].
+                "booking": booking,
+                "actions": [],
+            }
+        )
+        
+
+class DismissCancellationActionView(APIView):
+    parser_classes = [IsAuthenticated]
+    throttle_classes = [BookingThrottle]
+    
+    def post(self, request):
+        try:
+            booking = dismiss_cancellation(request.user)
+        except ValueError as error:
+            return Response(
+                {"detail": str(error)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        response_text = f"Kept your booking for {booking['event_name']}. It was not cancelled."
+        persist_action_outcome(request, response_text)
+        
+        return Response(
+            {
+                "response": response_text,
+                "booking": booking,
+                "actions": [],
+            }
+        )
+        

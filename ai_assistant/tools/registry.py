@@ -6,14 +6,14 @@ from ai_assistant.tools.event_tools import (
 )
 
 from ai_assistant.tools.booking_tools import (
-    cancel_booking,
+    prepare_cancel_booking,
     get_my_bookings,
     prepare_booking,
     retry_payment,
 )
 
 from ai_assistant.tools.schemas import (
-    CANCEL_BOOKING_TOOL,
+    PREPARE_CANCEL_BOOKING_TOOL,
     GET_ALL_EVENTS_TOOL,
     GET_AVAILABLE_SEATS_TOOL,
     GET_EVENT_DETAIL_TOOL,
@@ -64,9 +64,9 @@ TOOL_REGISTRY = {
         "function": retry_payment,
         "schema": RETRY_PAYMENT_TOOL,
     },
-    "cancel_booking": {
+        "prepare_cancel_booking": {
         "requires_auth": True,
-        "function": cancel_booking,
-        "schema": CANCEL_BOOKING_TOOL,
+        "function": prepare_cancel_booking,
+        "schema": PREPARE_CANCEL_BOOKING_TOOL,
     },
 }
