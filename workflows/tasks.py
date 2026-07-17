@@ -166,6 +166,56 @@ def cleanup_expired_pending_bookings_task():
     return deleted_count
 
 
+@shared_task
+def  cleanup_expired_pending_cancellations_task():
+    """
+    Delete expired AI assistant staged cancellations.
+    The underlying booking is untouched — only the staged confirmation expires.
+    """
+    from ai_assistant.models import PendingBookingCancellation
+    
+    deleted_count, _ = (
+        PendingBookingCancellation.objects
+        .filter(expires_at__lte=timezone.now())
+        .delete()
+    )
+    
+    logger.info(
+        "expired_pending_cancellations_cleaned",
+        extra={
+            "event": "expired_pending_cancellations_cleaned",
+            "deleted_count": deleted_count,
+        }
+    )
+    
+    return deleted_count
+
+
+@shared_task
+def cleanup_expired_pending_payment_retries_task():
+    """
+    Delete expired AI assistant staged payment retries.
+    The underlying booking is untouched — only the staged retry expires.
+    """
+    from ai_assistant.models import PendingPaymentRetry
+    
+    deleted_count, _ = (
+        PendingPaymentRetry.objects
+        .filter(expires_at__lte=timezone.now())
+        .delete()
+    )
+    
+    logger.info(
+        "expired_pending_payment_retries_cleaned",
+        extra={
+            "event": "expired_pending_payment_retries_cleaned",
+            "deleted_count": deleted_count,
+        }
+    )
+    
+    return deleted_count
+
+
 def handle_booking_confirmation(job):
     """
     Handle email sending for booking confirmation.

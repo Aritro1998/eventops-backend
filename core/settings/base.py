@@ -111,6 +111,14 @@ CELERY_BEAT_SCHEDULE = {
         "task": "workflows.tasks.cleanup_expired_pending_bookings_task",
         "schedule": crontab(minute="*/5"),
     },
+    "cleanup-expired-pending-cancellations": {
+        "task": "workflows.tasks.cleanup_expired_pending_cancellations_task",
+        "schedule": crontab(minute="*/5"),
+    },
+    "cleanup-expired-pending-payment-retries": {
+        "task": "workflows.tasks.cleanup_expired_pending_payment_retries_task",
+        "schedule": crontab(minute="*/5"),
+    },
 }
 
 LOGGING = {

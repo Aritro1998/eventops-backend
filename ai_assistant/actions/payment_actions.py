@@ -30,6 +30,10 @@ def get_pending_payment_retry_actions(user):
         pending.delete()
         return []
     
+    if pending.booking.status not in ("FAILED", "PENDING"):
+        pending.delete()
+        return []
+    
     return [
         {"type": "confirm_payment_retry", "label": "Retry Payment Now"},
         {"type": "dismiss_payment_retry", "label": "Not Now"},
@@ -50,10 +54,10 @@ def get_pending_payment_retry_draft(user):
     if not pending or pending.is_expired:
         return None
     
-    if pending.is_expired:
+    if pending.booking.status not in ("FAILED", "PENDING"):
         pending.delete()
-        return []
-    
+        return None
+
     booking = pending.booking
     
     return {
@@ -84,6 +88,10 @@ def confirm_payment_retry(user):
     if pending.is_expired:
         pending.delete()
         raise ValueError("This retry request has expired. Please try again.")
+    
+    if pending.booking.status not in ("FAILED", "PENDING"):
+        pending.delete()
+        raise ValueError("This booking is no longer eligible for a payment retry.")
     
     booking = pending.booking
     
