@@ -7,23 +7,19 @@ from ai_assistant.tools.event_tools import (
 
 from ai_assistant.tools.booking_tools import (
     cancel_booking,
-    create_booking,
     get_my_bookings,
     prepare_booking,
-    cancel_pending_booking,
     retry_payment,
 )
 
 from ai_assistant.tools.schemas import (
     CANCEL_BOOKING_TOOL,
-    CREATE_BOOKING_TOOL,
     GET_ALL_EVENTS_TOOL,
     GET_AVAILABLE_SEATS_TOOL,
     GET_EVENT_DETAIL_TOOL,
     GET_MY_BOOKINGS_TOOL,
     SEARCH_EVENTS_TOOL,
     PREPARE_BOOKING_TOOL,
-    CANCEL_PENDING_BOOKING_TOOL,
     RETRY_PAYMENT_TOOL,
 )
 
@@ -55,24 +51,12 @@ TOOL_REGISTRY = {
         "function": search_events,
         "schema": SEARCH_EVENTS_TOOL,
     },
-    "create_booking": {
-        "requires_auth": True,
-        "requires_request": True,
-        "function": create_booking,
-        "schema": CREATE_BOOKING_TOOL,
-    },
     "prepare_booking": {
         "requires_auth": True,
         "requires_request": True,
         "requires_chat_state": True,
         "function": prepare_booking,
         "schema": PREPARE_BOOKING_TOOL,
-    },
-    "cancel_pending_booking": {
-        "requires_auth": True,
-        "requires_request": True,
-        "function": cancel_pending_booking,
-        "schema": CANCEL_PENDING_BOOKING_TOOL,
     },
     "retry_payment": {
         "requires_auth": True,

@@ -128,7 +128,7 @@ SEARCH_EVENTS_TOOL = {
             "Never derive event ids from conversation history, list positions, "
             "memory, assumptions, previous tool outputs, or event ordering. "
             "Always call this tool before get_event_detail, "
-            "get_available_seats, or create_booking when the user provides an event name."
+            "get_available_seats, or prepare_booking when the user provides an event name."
         ),
         "parameters": {
             "type": "object",
@@ -148,23 +148,6 @@ SEARCH_EVENTS_TOOL = {
 }
 
 
-CREATE_BOOKING_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "create_booking",
-        "description": (
-            "Finalize the existing pending booking after explicit user confirmation. "
-            "Only call this when a pending booking exists and the user clearly confirms. "
-            "Never call this when the user is changing seats, changing event, cancelling the pending booking or asking a question."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {}
-        }
-    }
-}
-
-
 PREPARE_BOOKING_TOOL = {
     "type": "function",
     "function": {
@@ -173,7 +156,8 @@ PREPARE_BOOKING_TOOL = {
             "Prepare or replace a pending booking before final confirmation. "
             "Call this when the user chooses seats for a new booking, or when an existing "
             "pending booking exists and the user asks to change the seats. "
-            "After this tool succeeds, summarize the updated pending booking and ask for confirmation. "
+            "After this tool succeeds, summarize the updated pending booking and direct the user "
+            "to the displayed confirmation controls. "
             "Do not call this for affirmative confirmations like yes, confirm, proceed, or book it."
         ),
         "parameters": {
@@ -187,24 +171,6 @@ PREPARE_BOOKING_TOOL = {
                 }
             },
             "required": ["seat_numbers"]
-        }
-    }
-}
-
-
-CANCEL_PENDING_BOOKING_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "cancel_pending_booking",
-        "description": (
-            "Cancel and delete the existing pending booking before it is confirmed. "
-            "Call this only when a pending booking exists and the user clearly says "
-            "they do not want to proceed, such as no, cancel, never mind, stop, or don't book it. "
-            "Do not call this for confirmed bookings."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {}
         }
     }
 }
@@ -256,4 +222,3 @@ CANCEL_BOOKING_TOOL = {
         }
     }
 }
-

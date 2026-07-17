@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.env
+db.sqlite3
+celerybeat-schedule
+celerybeat-schedule.*
+.vscode/
+**/.DS_Store
+AGENTS.md

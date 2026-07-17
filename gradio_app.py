@@ -1,48 +1,401 @@
 import gradio as gr
 import requests
+from datetime import datetime
+from html import escape
+
 
 DJANGO_API_URL = "http://web:8000/api/ai-assistant/chat/"
+CONFIRM_DRAFT_URL = (
+    "http://web:8000/api/ai-assistant/actions/confirm-pending-booking/"
+)
+CANCEL_DRAFT_URL = (
+    "http://web:8000/api/ai-assistant/actions/cancel-pending-booking/"
+)
 DJANGO_LOGIN_URL = "http://web:8000/api/auth/token/"
-DJANGO_REGISTER_URL = "http://web:8000//api/auth/register/"
+DJANGO_REGISTER_URL = "http://web:8000/api/auth/register/"
+
+WELCOME_MESSAGE = {
+    "role": "assistant",
+    "content": "Hi! I can help you discover events, compare prices, and manage bookings.",
+}
+
+BRAND_HEADER_HTML = (
+    "<div class='brand-header'>"
+    "<div class='brand-mark'>E</div>"
+    "<div class='brand-text'><h1>EventOps</h1><p>Browse events with AI</p></div>"
+    "</div>"
+)
+
+CUSTOM_CSS = """
+.gradio-container {
+    max-width: 1320px !important;
+    margin: 0 auto !important;
+    font-size: 16px !important;
+}
+
+/* ---------- Sidebar shell ---------- */
+.sidebar {
+    background: var(--background-fill-secondary);
+    border: 1px solid var(--border-color-primary);
+    border-radius: 18px;
+    padding: 22px 18px !important;
+    max-height: 88vh;
+    overflow-y: auto;
+}
+
+.brand-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+.brand-mark {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, var(--color-accent), #a78bfa);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 20px;
+    flex-shrink: 0;
+}
+.brand-text h1 {
+    font-size: 21px;
+    margin: 0;
+    font-weight: 800;
+}
+.brand-text p {
+    margin: 2px 0 0;
+    font-size: 12.5px;
+    color: var(--body-text-color-subdued);
+}
+
+/* ---------- Auth ---------- */
+.auth-hint p {
+    font-size: 13px !important;
+    color: var(--body-text-color-subdued) !important;
+    margin: 0 0 10px !important;
+}
+.auth-error {
+    font-size: 12.5px;
+    color: #dc2626;
+    margin-top: 8px;
+    min-height: 0;
+}
+.auth-btn {
+    margin-top: 6px !important;
+}
+
+/* ---------- Profile card ---------- */
+.profile-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 14px;
+    background: var(--background-fill-primary);
+    margin-bottom: 10px;
+}
+.avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 16px;
+    flex-shrink: 0;
+}
+.profile-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.profile-name {
+    font-weight: 700;
+    font-size: 14.5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.profile-role {
+    font-size: 12px;
+    color: var(--body-text-color-subdued);
+}
+
+/* ---------- Section label + quick actions ---------- */
+.section-label, .section-label p {
+    font-size: 12px !important;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: var(--body-text-color-subdued) !important;
+    margin: 20px 0 8px !important;
+}
+
+.quick-actions button {
+    justify-content: flex-start !important;
+    border-radius: 10px !important;
+    font-weight: 500 !important;
+    padding: 11px 14px !important;
+    font-size: 14.5px !important;
+    transition: transform .15s ease, box-shadow .15s ease;
+}
+.quick-actions button:hover {
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+    transform: translateY(-1px);
+}
+
+/* ---------- Chat panel ---------- */
+.chat-panel {
+    border: 1px solid var(--border-color-primary);
+    border-radius: 18px !important;
+    overflow: hidden;
+    background: var(--background-fill-primary);
+}
+
+.message-row {
+    margin-top: 18px !important;
+}
+
+/* The cap must live on the outer row, not the inner message div: the inner
+   div is 100%-wide all the way down to the text, so a percentage max-width
+   there resolves against an already-collapsed ancestor and makes short
+   messages (e.g. "book 50") wrap after just a couple of characters. */
+.message-row.bubble.user-row, .message-row.bubble.bot-row {
+    max-width: 74% !important;
+}
+
+.bot.message, .user.message {
+    font-size: 15px !important;
+    line-height: 1.5 !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+/* Gradio groups consecutive same-role turns into one bubble with several
+   .message-content children; without a divider they read as one wall of text. */
+.message-content + .message-content {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--border-color-primary);
+}
+
+.user.message, .user.message * {
+    color: #fff !important;
+    background: transparent;
+}
+.user.message {
+    background: var(--color-accent) !important;
+    border: none !important;
+}
+
+.draft-actions {
+    padding: 14px 20px !important;
+    gap: 12px !important;
+    border-top: 1px solid var(--border-color-primary);
+    background: var(--background-fill-secondary);
+}
+.draft-actions button {
+    border-radius: 999px !important;
+    font-size: 15px !important;
+    padding: 12px 20px !important;
+    font-weight: 600 !important;
+}
+
+.composer {
+    padding: 16px 20px 20px !important;
+    gap: 10px !important;
+    align-items: center !important;
+}
+.composer textarea {
+    border-radius: 999px !important;
+    font-size: 15px !important;
+    padding: 12px 18px !important;
+}
+.composer button {
+    border-radius: 999px !important;
+    min-width: 90px;
+    font-size: 15px !important;
+    font-weight: 600 !important;
+}
+"""
+
+
+def format_event_time(iso_string):
+    try:
+        dt = datetime.fromisoformat(iso_string)
+    except (TypeError, ValueError):
+        return iso_string
+    return dt.strftime("%d %b %Y, %I:%M %p")
+
+
+def render_status_card(icon, accent, title, subtitle, rows):
+    rows_html = "".join(
+        f"<tr>"
+        f"<td style='padding:6px 0;color:var(--body-text-color-subdued);'>{label}</td>"
+        f"<td style='padding:6px 0;text-align:right;font-weight:600;'>{value}</td>"
+        f"</tr>"
+        for label, value in rows
+    )
+
+    return (
+        "<div style='border:1px solid var(--border-color-primary);border-radius:12px;"
+        "padding:20px 24px;max-width:380px;background:var(--background-fill-primary);'>"
+        "<div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>"
+        f"<span style='color:{accent};font-size:18px;'>{icon}</span>"
+        f"<span style='font-size:17px;font-weight:700;'>{title}</span>"
+        "</div>"
+        f"<div style='color:var(--body-text-color-subdued);font-size:13px;margin-bottom:14px;'>{subtitle}</div>"
+        f"<table style='width:100%;font-size:14px;border-collapse:collapse;'>{rows_html}</table>"
+        "</div>"
+    )
+
+
+def render_booking_card(booking):
+    is_confirmed = booking.get("status") == "CONFIRMED"
+    seats = ", ".join(str(s) for s in booking.get("seat_numbers", []))
+
+    icon, title, subtitle = (
+        ("&#10003;", "Booking Confirmed", "Your booking has been successfully confirmed.")
+        if is_confirmed
+        else (
+            "&#8987;",
+            "Booking Pending",
+            f"Your booking was created with status {escape(booking.get('status', ''))}.",
+        )
+    )
+    accent = "#16a34a" if is_confirmed else "#d97706"
+
+    rows = [
+        ("Event", escape(booking.get("event_name", ""))),
+        ("Seat", escape(seats)),
+        ("Time", escape(format_event_time(booking.get("event_start_time", "")))),
+        ("Amount", f"₹{escape(booking.get('amount', ''))}"),
+        ("Booking ID", escape(str(booking.get("booking_id", "")))),
+    ]
+    return render_status_card(icon, accent, title, subtitle, rows)
+
+
+def render_draft_card(draft):
+    seats = ", ".join(str(s) for s in draft.get("seat_numbers", []))
+    rows = [
+        ("Event", escape(draft.get("event_name", ""))),
+        ("Seat", escape(seats)),
+        ("Time", escape(format_event_time(draft.get("event_start_time", "")))),
+        ("Amount", f"₹{escape(draft.get('amount', ''))}"),
+    ]
+    return render_status_card(
+        "&#128221;",
+        "var(--color-accent)",
+        "Booking Draft",
+        "Review the details, then confirm or cancel below.",
+        rows,
+    )
+
+
+def render_profile_card(username):
+    initial = escape(username[:1].upper()) if username else "?"
+    return (
+        "<div class='profile-card'>"
+        f"<div class='avatar'>{initial}</div>"
+        "<div class='profile-meta'>"
+        f"<div class='profile-name'>{escape(username)}</div>"
+        "<div class='profile-role'>Signed in</div>"
+        "</div></div>"
+    )
+
+
+def render_error(text):
+    return f"<div class='auth-error'>{escape(text)}</div>" if text else ""
+
 
 def format_error(data):
-    if isinstance(data, dict):
-        parts = []
-        for field, messages in data.items():
-            if isinstance(messages, list):
-                parts.append(f"{field}: {', '.join(map(str, messages))}")
-            else:
-                parts.append(f"{field}: {messages}")
-        return "; ".join(parts)
+    if not isinstance(data, dict):
+        return str(data)
 
-    return str(data)
+    parts = []
+    for field, messages in data.items():
+        if isinstance(messages, list):
+            parts.append(f"{field}: {', '.join(map(str, messages))}")
+        else:
+            parts.append(f"{field}: {messages}")
+    return "; ".join(parts)
 
 
-def chat_with_ai(message, token, conversation_id):
+def request_json(url, token=None, payload=None):
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    payload = {"message": message}
-    if conversation_id:
-        payload["conversation_id"] = conversation_id
-
     try:
         response = requests.post(
-            DJANGO_API_URL,
+            url,
             json=payload,
             headers=headers,
             timeout=60,
         )
         data = response.json()
     except requests.RequestException:
-        return "The chat service is unavailable. Please try again.", conversation_id
+        return {"error": "The service is unavailable. Please try again."}
     except ValueError:
-        return "The chat service returned an invalid response.", conversation_id
+        return {"error": "The service returned an invalid response."}
+
+    if not response.ok:
+        return {"error": data.get("detail", format_error(data))}
+
+    return data
+
+
+def chat_with_ai(message, token, conversation_id):
+    payload = {"message": message}
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
+
+    data = request_json(DJANGO_API_URL, token=token, payload=payload)
+    if "error" in data:
+        # Keep the existing action panel visible after a transient chat failure.
+        return data["error"], conversation_id, None, None
 
     return (
-        data.get("response", data.get("error", "Unknown error")),
+        data.get("response", "Unknown error"),
         data.get("conversation_id", conversation_id),
+        data.get("actions", []),
+        data.get("draft"),
+    )
+
+
+def login(username, password):
+    data = request_json(
+        DJANGO_LOGIN_URL,
+        payload={"username": username, "password": password},
+    )
+    token = data.get("access")
+
+    if token:
+        return (
+            token,
+            render_profile_card(username),
+            gr.update(visible=False),
+            gr.update(visible=True),
+            gr.update(visible=True),
+            "",
+            "",
+        )
+
+    return (
+        None,
+        "",
+        gr.update(visible=True),
+        gr.update(visible=False),
+        gr.update(visible=False),
+        render_error(f"Login failed: {data.get('error', 'Unknown error')}"),
+        "",
     )
 
 
@@ -50,246 +403,253 @@ def register(username, email, password):
     if not username or not email or not password:
         return (
             None,
-            "Please enter username, email, and password.",
+            "",
             gr.update(visible=True),
             gr.update(visible=False),
+            gr.update(visible=False),
+            render_error("Please enter username, email, and password."),
+            "",
         )
 
-    response = requests.post(
+    data = request_json(
         DJANGO_REGISTER_URL,
-        json={
-            "username": username,
-            "email": email,
-            "password": password,
-        }
+        payload={"username": username, "email": email, "password": password},
     )
-
-    if response.status_code != 201:
-        try:
-            data = response.json()
-        except Exception:
-            data = {}
-
+    if "error" in data:
         return (
             None,
-            f"Registration failed: {format_error(data)}",
+            "",
             gr.update(visible=True),
             gr.update(visible=False),
+            gr.update(visible=False),
+            render_error(f"Registration failed: {data['error']}"),
+            "",
         )
 
     return login(username, password)
 
 
-def login(username, password):
-    response = requests.post(
-        DJANGO_LOGIN_URL,
-        json={"username": username, "password": password}
-    )
-
-    if response.status_code == 200:
-        token = response.json().get("access")
-
-        return (
-            token,
-            f"""
-<div style='text-align:center; font-size:40px; font-weight:700;'>
-👤 {username}
-</div>
-""",
-            gr.update(visible=False),
-            gr.update(visible=True)
-        )
-
+def action_updates(actions):
+    action_types = {action["type"] for action in actions}
+    has_actions = bool(actions)
     return (
-        None,
-        "❌ Login failed",
-        gr.update(),
-        gr.update()
+        actions,
+        gr.update(visible=has_actions),
+        gr.update(visible="confirm_pending_booking" in action_types),
+        gr.update(visible="cancel_pending_booking" in action_types),
+        gr.update(visible=not has_actions),
     )
 
 
 def logout():
     return (
         None,
-        """
-<div style='text-align:center; font-size:32px; font-weight:600;'>
-🔓 Guest User
-</div>
-        """,
+        "",
         gr.update(visible=True),
         gr.update(visible=False),
+        gr.update(visible=False),
         None,
-        [
-            {
-                "role": "assistant",
-                "content": "Hi! I can help you discover events, compare prices, and later manage bookings.",
-            }
-        ],
+        [WELCOME_MESSAGE],
+        *action_updates([]),
     )
+
+
+def add_user_message(message, history):
+    # Runs instantly (no network call) so the user's own message appears
+    # right away instead of waiting alongside the AI's reply.
+    if not message or not message.strip():
+        return history, gr.update()
+    return history + [{"role": "user", "content": message}], ""
+
+
+def get_ai_response(history, token, conversation_id, current_actions):
+    # Nothing to do if add_user_message skipped an empty message.
+    if not history or history[-1]["role"] != "user":
+        return history, conversation_id, *action_updates(current_actions)
+
+    message = history[-1]["content"]
+    response, conversation_id, actions, draft = chat_with_ai(
+        message,
+        token,
+        conversation_id,
+    )
+    content = render_draft_card(draft) if draft else response
+    history = history + [{"role": "assistant", "content": content}]
+
+    # Keep draft controls visible when the chat request itself failed.
+    if actions is None:
+        actions = current_actions
+
+    return history, conversation_id, *action_updates(actions)
+
+
+def run_draft_action(url, token, history, current_actions, conversation_id, action_label):
+    # Log the click as its own chat turn so it visually separates the prior
+    # assistant message from the outcome, instead of both sharing one bubble.
+    history = history + [{"role": "user", "content": action_label}]
+
+    data = request_json(
+        url,
+        token=token,
+        payload={"conversation_id": conversation_id},
+    )
+    booking = data.get("booking")
+    if booking:
+        content = render_booking_card(booking)
+    else:
+        content = data.get("response", data.get("error", "Action failed."))
+    history = history + [{"role": "assistant", "content": content}]
+
+    # A failed action keeps the existing controls available for a retry.
+    actions = data.get("actions", current_actions)
+    return history, *action_updates(actions)
 
 
 with gr.Blocks(
     title="EventOps AI Assistant",
     theme=gr.themes.Soft(),
+    css=CUSTOM_CSS,
 ) as demo:
-
     token_state = gr.State(None)
     conversation_id_state = gr.State(None)
+    action_state = gr.State([])
 
-    with gr.Row(equal_height=False):
+    with gr.Row(equal_height=True):
+        with gr.Column(scale=1, min_width=280, elem_classes=["sidebar"]):
+            gr.HTML(BRAND_HEADER_HTML)
 
-        with gr.Column(scale=1, min_width=220):
-            gr.Markdown("# 🎟️ EventOps")
-            gr.Markdown("### Browse events with AI")
+            with gr.Column(visible=True) as guest_panel:
+                gr.Markdown("Sign in to manage your bookings.", elem_classes=["auth-hint"])
+                with gr.Tabs():
+                    with gr.Tab("Log In"):
+                        login_username = gr.Textbox(label="Username")
+                        login_password = gr.Textbox(label="Password", type="password")
+                        login_btn = gr.Button(
+                            "Log In", variant="primary", elem_classes=["auth-btn"]
+                        )
+                        login_error = gr.HTML("")
+                    with gr.Tab("Create Account"):
+                        reg_username = gr.Textbox(label="Username")
+                        reg_email = gr.Textbox(label="Email")
+                        reg_password = gr.Textbox(label="Password", type="password")
+                        register_btn = gr.Button(
+                            "Create Account", variant="primary", elem_classes=["auth-btn"]
+                        )
+                        register_error = gr.HTML("")
 
-            login_status = gr.Markdown(
-    """
-    <div style='text-align:center; font-size:32px; font-weight:600;'>
-    🔓 Guest User
-    </div>
-    """
-)
+            with gr.Column(visible=False) as profile_panel:
+                profile_card = gr.HTML("")
+                logout_btn = gr.Button("Log Out", variant="secondary")
 
-            logged_in_actions = gr.Column(visible=False)
+            with gr.Column(visible=False) as quick_actions_panel:
+                gr.Markdown("Quick Actions", elem_classes=["section-label"])
+                with gr.Column(elem_classes=["quick-actions"]):
+                    weekend_btn = gr.Button("Events This Weekend")
+                    cheap_btn = gr.Button("Cheapest Events")
+                    expensive_btn = gr.Button("Most Expensive Events")
+                    next_month_btn = gr.Button("Events Next Month")
 
-            with gr.Accordion("Login / Register", open=False) as login_section:
-                email = gr.Textbox(label="Email", placeholder="Only for registration")
-
-                username = gr.Textbox(label="Username")
-
-                password = gr.Textbox(
-                    label="Password",
-                    type="password"
-                )
-
-                login_btn = gr.Button(
-                    "Login",
-                    variant="primary"
-                )
-                register_btn = gr.Button(
-                    "Register",
-                    variant="secondary"
-                )
-
-            with logged_in_actions:
-                logout_btn = gr.Button(
-                    "Logout",
-                    variant="secondary"
-                )
-
-            gr.Markdown("### Quick Actions")
-
-            weekend_btn = gr.Button("🎟️ Events This Weekend")
-            cheap_btn = gr.Button("💰 Cheapest Events")
-            expensive_btn = gr.Button("🏆 Most Expensive Events")
-            next_month_btn = gr.Button("📅 Events Next Month")
-
-        with gr.Column(scale=4):
-
+        with gr.Column(scale=4, elem_classes=["chat-panel"]):
             chatbot = gr.Chatbot(
                 type="messages",
-                height="80vh",
-                value=[
-                    {
-                        "role": "assistant",
-                        "content": "Hi! I can help you discover events, compare prices, and later manage bookings."
-                    }
-                ]
-            )
-
-            msg = gr.Textbox(
-                placeholder="Ask about events...",
+                height="72vh",
+                value=[WELCOME_MESSAGE],
                 show_label=False,
-                container=False
             )
+            with gr.Row(visible=False, elem_classes=["draft-actions"]) as action_row:
+                confirm_draft_btn = gr.Button("Confirm booking", variant="primary", visible=False)
+                cancel_draft_btn = gr.Button("Cancel draft", variant="secondary", visible=False)
 
-            send_btn = gr.Button(
-                "Send",
-                variant="primary"
-            )
+            with gr.Row(elem_classes=["composer"]) as composer_row:
+                msg = gr.Textbox(
+                    placeholder="Ask about events...",
+                    show_label=False,
+                    container=False,
+                    scale=5,
+                )
+                send_btn = gr.Button("Send", variant="primary", scale=1)
+
+    auth_outputs = [token_state, profile_card, guest_panel, profile_panel, quick_actions_panel]
 
     login_btn.click(
         fn=login,
-        inputs=[username, password],
-        outputs=[
-            token_state,
-            login_status,
-            login_section,
-            logged_in_actions,
-        ]
+        inputs=[login_username, login_password],
+        outputs=[*auth_outputs, login_error, login_password],
     )
-
+    register_btn.click(
+        fn=register,
+        inputs=[reg_username, reg_email, reg_password],
+        outputs=[*auth_outputs, register_error, reg_password],
+    )
     logout_btn.click(
         fn=logout,
         outputs=[
-            token_state,
-            login_status,
-            login_section,
-            logged_in_actions,
+            *auth_outputs,
             conversation_id_state,
             chatbot,
-        ]
+            action_state,
+            action_row,
+            confirm_draft_btn,
+            cancel_draft_btn,
+            composer_row,
+        ],
     )
 
-    register_btn.click(
-        fn=register,
-        inputs=[username, email, password],
-        outputs=[
-            token_state,
-            login_status,
-            login_section,
-            logged_in_actions,
-        ]
-    )
-
-    def chat_wrapper(message, history, token, conversation_id):
-        response, conversation_id = chat_with_ai(
-            message,
-            token,
-            conversation_id,
-        )
-
-        history = history + [
-            {"role": "user", "content": message},
-            {"role": "assistant", "content": response},
-        ]
-
-        return history, "", conversation_id
-
+    ai_response_inputs = [chatbot, token_state, conversation_id_state, action_state]
+    ai_response_outputs = [
+        chatbot,
+        conversation_id_state,
+        action_state,
+        action_row,
+        confirm_draft_btn,
+        cancel_draft_btn,
+        composer_row,
+    ]
     send_btn.click(
-        fn=chat_wrapper,
-        inputs=[msg, chatbot, token_state, conversation_id_state],
-        outputs=[chatbot, msg, conversation_id_state]
-    )
-
+        fn=add_user_message, inputs=[msg, chatbot], outputs=[chatbot, msg]
+    ).then(fn=get_ai_response, inputs=ai_response_inputs, outputs=ai_response_outputs)
     msg.submit(
-        fn=chat_wrapper,
-        inputs=[msg, chatbot, token_state, conversation_id_state],
-        outputs=[chatbot, msg, conversation_id_state]
+        fn=add_user_message, inputs=[msg, chatbot], outputs=[chatbot, msg]
+    ).then(fn=get_ai_response, inputs=ai_response_inputs, outputs=ai_response_outputs)
+
+    action_inputs = [token_state, chatbot, action_state, conversation_id_state]
+    action_outputs = [
+        chatbot,
+        action_state,
+        action_row,
+        confirm_draft_btn,
+        cancel_draft_btn,
+        composer_row,
+    ]
+    confirm_draft_btn.click(
+        fn=lambda token, history, actions, conversation_id: run_draft_action(
+            CONFIRM_DRAFT_URL,
+            token,
+            history,
+            actions,
+            conversation_id,
+            "Confirm booking",
+        ),
+        inputs=action_inputs,
+        outputs=action_outputs,
+    )
+    cancel_draft_btn.click(
+        fn=lambda token, history, actions, conversation_id: run_draft_action(
+            CANCEL_DRAFT_URL,
+            token,
+            history,
+            actions,
+            conversation_id,
+            "Cancel draft",
+        ),
+        inputs=action_inputs,
+        outputs=action_outputs,
     )
 
-    def set_prompt(text):
-        return text
-
-    weekend_btn.click(
-        fn=lambda: "What events are available this weekend?",
-        outputs=msg
-    )
-
-    cheap_btn.click(
-        fn=lambda: "Show me the cheapest events",
-        outputs=msg
-    )
-
-    expensive_btn.click(
-        fn=lambda: "Show me the most expensive events",
-        outputs=msg
-    )
-
-    next_month_btn.click(
-        fn=lambda: "What events are available next month?",
-        outputs=msg
-    )
+    weekend_btn.click(fn=lambda: "What events are available this weekend?", outputs=msg)
+    cheap_btn.click(fn=lambda: "Show me the cheapest events", outputs=msg)
+    expensive_btn.click(fn=lambda: "Show me the most expensive events", outputs=msg)
+    next_month_btn.click(fn=lambda: "What events are available next month?", outputs=msg)
 
 
 demo.launch(server_name="0.0.0.0", server_port=7860)

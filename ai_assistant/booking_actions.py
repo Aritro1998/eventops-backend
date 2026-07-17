@@ -1,0 +1,102 @@
+import uuid
+from events.models import Event, Seat
+from bookings.services import BookingService
+from ai_assistant.models import PendingBooking
+
+
+def get_pending_booking_actions(user):
+    """Return UI actions only when the authenticated user has a live draft."""
+
+    pending = PendingBooking.objects.filter(user=user).first()
+
+    if not pending:
+        return []
+
+    if pending.is_expired:
+        pending.delete()
+        return []
+
+    return [
+        {"type": "confirm_pending_booking", "label": "Confirm booking"},
+        {"type": "cancel_pending_booking", "label": "Cancel Draft"},
+    ]
+
+
+def get_pending_booking_draft(user):
+    """Return the current draft's details for rendering, or None."""
+
+    pending = PendingBooking.objects.filter(user=user).select_related("event").first()
+
+    if not pending or pending.is_expired:
+        return None
+
+    return {
+        "event_name": pending.event.name,
+        "seat_numbers": pending.seat_numbers,
+        "amount": str(pending.amount),
+        "event_start_time": pending.event.start_time.isoformat(),
+    }
+
+
+def confirm_pending_booking(user):
+    """Turn the user's draft into a real booking using the existing service."""
+
+    pending = PendingBooking.objects.filter(user=user).first()
+
+    if not pending:
+        raise ValueError("No pending booking found")
+
+    if pending.is_expired:
+        pending.delete()
+        raise ValueError("Pending booking has expired. Please choose seats again.")
+
+    event = Event.objects.get(id=pending.event_id)
+    seat_numbers = pending.seat_numbers
+    seat_ids = list(
+        Seat.objects.filter(
+            event=event,
+            seat_number__in=seat_numbers
+        ).values_list('id', flat=True)
+    )
+
+    # Do not silently drop a seat if a stale draft references invalid data.
+    if len(seat_ids) != len(set(seat_numbers)):
+        raise ValueError("The pending booking contains invalid seats. Please choose seats again.")
+
+    booking, is_existing = BookingService.create_booking_for_user(
+        user=user,
+        event=event,
+        seat_ids=seat_ids,
+        idempotency_key=str(uuid.uuid4())
+    )
+
+    pending.delete()
+
+    return {
+        "booking_id": booking.id,
+        "event_name": event.name,
+        "seat_numbers": seat_numbers,
+        "status": booking.status,
+        "amount": str(booking.amount),
+        "is_existing": is_existing,
+        "event_start_time": event.start_time.isoformat(),
+    }
+
+
+def cancel_pending_booking_draft(user):
+    """Discard only the authenticated user's unconfirmed booking draft."""
+
+    pending = PendingBooking.objects.filter(user=user).first()
+
+    if not pending:
+        raise ValueError("No pending booking found")
+
+    event_name = pending.event.name
+    seat_numbers = pending.seat_numbers
+    pending.delete()
+
+    return {
+        "event_name": event_name,
+        "seat_numbers": seat_numbers,
+        "status": "cancelled",
+    }

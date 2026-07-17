@@ -3,6 +3,7 @@ import json
 from openai import OpenAI
 from django.utils import timezone
 
+from ai_assistant.booking_actions import get_pending_booking_draft
 from ai_assistant.chat_state import ChatState
 from ai_assistant.models import PendingBooking
 from core.settings.base import OPENAI_API_KEY
@@ -29,24 +30,16 @@ def get_system_prompt(user=None, request=None, chat_state=None):
 
     if pending_booking:
         pending_booking_info = f"""
-            Pending booking rules take priority over the normal booking flow.
-            If a pending booking exists, first decide whether the user is:
-            - confirming it
-            - changing seats
-            - changing event
-            - cancelling it
-            - asking an unrelated question
+            There is an existing pending booking draft. The interface displays
+            Confirm booking and Cancel draft controls for it.
 
-            There is already a pending booking, pending booking rules and details are below.
-
-            If there is a pending booking and the user's message is an affirmative confirmation
-            such as "yes", "confirm", "proceed", "book it", "go ahead", or "looks good":
-                you MUST call create_booking in the same response.
-                Do not ask for confirmation again.
-                Do not call prepare_booking.
+            Do not create or cancel this draft yourself. If the user says
+            "yes", "confirm", "proceed", "cancel", or similar, briefly direct
+            them to the displayed controls. Never claim the booking was confirmed
+            or cancelled unless a backend tool result confirms it.
 
             If there is a pending booking and the user provides replacement seats:
-                call prepare_booking again with new seats and DO NOT call create_booking.
+                call prepare_booking again with new seats.
                 you MUST call prepare_booking in the same response.
                 Do not say "I will prepare" unless the tool call has already been made.
 
@@ -54,16 +47,6 @@ def get_system_prompt(user=None, request=None, chat_state=None):
                 call search_events to find the new event. Then call get_available_seats
                 for that event before calling prepare_booking. get_available_seats updates
                 the server-side selected event. Do not call prepare_booking until it succeeds.
-
-            If the user clearly cancels or rejects the pending booking draft with messages
-            such as "no", "cancel this draft", "never mind", "stop", or "don't book it":
-                call cancel_pending_booking.
-
-            Do not call cancel_pending_booking when the user refers to a confirmed booking,
-            a booking ID, or says "cancel this booking" after a confirmed booking summary.
-
-            If both a pending draft and confirmed bookings exist and the request is ambiguous,
-            ask which booking the user wants to cancel.
 
             Pending booking details:
             - Event ID: {pending_booking.event.id}
@@ -106,18 +89,19 @@ def get_system_prompt(user=None, request=None, chat_state=None):
         2. Use get_available_seats. Don't print the seats as a list, use a grid format (10 columns and N rows).
         3. Ask the user which seats they want. Pass seat numbers to prepare_booking.
         4. Call prepare_booking.
-        5. Show booking summary.
-        6. Ask the user for confirmation.
+        5. Show the booking summary.
+        6. Do not ask the user to type "yes" or another confirmation message.
+        Tell them to use the displayed Confirm booking or Cancel draft button below the chat.
 
         When the user asks to retry payment, complete payment, pay again, or fix a failed payment:
         1. If the booking id is known from the user's message or conversation history, call retry_payment.
         2. If the booking id is not known, call get_my_bookings to show the user's bookings and ask which booking to retry.
         3. Never retry payment for a booking unless it belongs to the current authenticated user.
-        
+
         When the user asks to cancel a confirmed booking:
         1. If the booking ID is known and the request is clear, call cancel_booking.
         2. If it is unknown, call get_my_bookings with status CONFIRMED and ask the user which booking to cancel.
-        3. Use cancel_pending_booking only for an unconfirmed booking draft.
+        3. For an unconfirmed draft, direct the user to the displayed Cancel draft control.
 
         If a tool result contains an error field:
         - Explain the error clearly to the user.
@@ -186,6 +170,7 @@ class AIAssistantService:
 
 
         # 4. Make the tool calls
+        booking_drafted = False
         for _ in range(MAX_TOOL_CALLS):
             message = response.choices[0].message
             # If there are no tool calls, add the turn and return the response
@@ -196,7 +181,10 @@ class AIAssistantService:
                 ChatState.add_turn(chat_state, "assistant", message.content)
                 ChatState.save(conversation_id, chat_state)
 
-                return message.content
+                # Only surface a draft card on the turn that actually created
+                # or updated it, not on every later unrelated message.
+                draft = get_pending_booking_draft(user) if booking_drafted else None
+                return message.content, draft
 
             messages.append(message)
             # Loop through the tool calls
@@ -245,6 +233,8 @@ class AIAssistantService:
 
                 try:
                     tool_result = tool_function(**kwargs)
+                    if tool_name == "prepare_booking" and "error" not in tool_result:
+                        booking_drafted = True
                 except Exception as e:
                     tool_result = {"error": str(e)}
 
@@ -273,4 +263,4 @@ class AIAssistantService:
         return (
             "[MAX_TOOL_CALLS_EXCEEDED] Sorry, I unfortunately I was unable to complete that request. "
             "Please try again later."
-        )
+        ), None
