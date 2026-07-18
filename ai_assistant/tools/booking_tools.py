@@ -29,16 +29,21 @@ def get_my_bookings(user, status=None):
     return serializer.data
 
 
-def prepare_booking(user, request, conversation_id, chat_state, seat_numbers=None, quantity=None):
+def prepare_booking(user, request, conversation_id, chat_state, seat_labels=None, quantity=None):
     """
     Stage a booking draft for whichever event get_available_seats last
     selected server-side. Branches entirely on event.is_general_admission:
     GA events take `quantity` and auto-pick that many available seats
     (their identities are never shown to the user); labeled events take
-    explicit `seat_numbers` and validate each one exists and is still
-    available. Either way, the result lands in PendingBooking.seat_numbers
-    in the same shape, so confirm_pending_booking (ai_assistant/actions/
-    booking_actions.py) doesn't need to know or care which path was taken.
+    `seat_labels` — the exact label strings get_available_seats showed —
+    and resolve them to real seats server-side. The model never computes
+    or guesses a label-to-seat_number mapping itself; it only ever echoes
+    back a label it was already shown, and the resolution below is what
+    actually turns that into a seat identity, failing loudly if the label
+    doesn't match anything real. Either way, the result lands in
+    PendingBooking.seat_numbers in the same shape, so confirm_pending_booking
+    (ai_assistant/actions/booking_actions.py) doesn't need to know or care
+    which path was taken.
     """
     # get_available_seats stores this value in Redis. The model never supplies
     # an event ID here, so it cannot switch the booking to a guessed event.
@@ -52,7 +57,7 @@ def prepare_booking(user, request, conversation_id, chat_state, seat_numbers=Non
             "event": "ai_tool_prepare_booking",
             "user_id": user.id,
             "event_id": event_id,
-            "seat_numbers": seat_numbers,
+            "seat_labels": seat_labels,
             "quantity": quantity,
         }
     )
@@ -61,8 +66,8 @@ def prepare_booking(user, request, conversation_id, chat_state, seat_numbers=Non
 
     if event.is_general_admission:
         if quantity is None or quantity <= 0:
-            raise ValueError("This is a general admission event. Specify a quantity of tickets, not seat numbers.")
-        if seat_numbers:
+            raise ValueError("This is a general admission event. Specify a quantity of tickets, not seats.")
+        if seat_labels:
             raise ValueError("This is a general admission event; specific seats cannot be chosen. Use quantity instead.")
 
         # Anonymous seats are picked here, not shown to the user — GA bookings
@@ -73,39 +78,43 @@ def prepare_booking(user, request, conversation_id, chat_state, seat_numbers=Non
         if len(seat_numbers) < quantity:
             raise ValueError(f"Only {len(seat_numbers)} tickets are available for {event.name}.")
     else:
-        if not seat_numbers:
-            raise ValueError("Choose at least one seat number for this event.")
+        if not seat_labels:
+            raise ValueError("Choose at least one seat for this event.")
         if quantity:
-            raise ValueError("This event uses specific seats, not a quantity. Provide seat_numbers instead.")
+            raise ValueError("This event uses specific seats, not a quantity. Provide seat_labels instead.")
 
         # Reject duplicates before calculating the price or creating the draft.
-        if len(seat_numbers) != len(set(seat_numbers)):
-            raise ValueError("Choose at least one unique seat number.")
+        if len(seat_labels) != len(set(seat_labels)):
+            raise ValueError("Choose at least one unique seat.")
 
-        # Confirm each requested number belongs to the currently selected event.
-        # Seat numbers are only unique within one event, not globally.
-        existing_seats = set(
-            Seat.objects.filter(
-                event=event,
-                seat_number__in=seat_numbers
-            ).values_list('seat_number', flat=True)
-        )
+        # Resolve labels to seat_numbers server-side — mirrors how
+        # search_events resolves an event name into an id. The model
+        # never has a legitimate way to compute this mapping itself
+        # (row/column arithmetic without knowing the layout), so it must
+        # never be asked to; it only echoes back a label it was shown.
+        label_to_seat_number = {
+            (seat.display_label or str(seat.seat_number)): seat.seat_number
+            for seat in Seat.objects.filter(event=event)
+        }
+        missing_labels = [label for label in seat_labels if label not in label_to_seat_number]
+        if missing_labels:
+            raise ValueError(f"Seats {missing_labels} do not exist for {event.name}.")
 
-        missing_seats = set(seat_numbers) - existing_seats
-        if missing_seats:
-            raise ValueError(f"Seats {sorted(missing_seats)} do not exist for {event.name}.")
+        seat_numbers = [label_to_seat_number[label] for label in seat_labels]
 
         # This is an early user-facing availability check, not a reservation.
         # BookingService repeats the check under row locks after confirmation,
         # which prevents two users from booking the same seat concurrently.
-        available_seats = set(
+        available_seat_numbers = set(
             EventService.get_available_seats(event.id)
             .filter(seat_number__in=seat_numbers)
             .values_list('seat_number', flat=True)
         )
-        unavailable_seats = set(seat_numbers) - available_seats
-        if unavailable_seats:
-            raise ValueError(f"Seats {sorted(unavailable_seats)} are no longer available for {event.name}.")
+        unavailable_seat_numbers = set(seat_numbers) - available_seat_numbers
+        if unavailable_seat_numbers:
+            seat_number_to_label = {v: k for k, v in label_to_seat_number.items()}
+            unavailable_labels = [seat_number_to_label[sn] for sn in unavailable_seat_numbers]
+            raise ValueError(f"Seats {unavailable_labels} are no longer available for {event.name}.")
 
     # One user has one active draft. Choosing a different event or seat set
     # replaces the previous draft until the user explicitly confirms it.
@@ -122,7 +131,7 @@ def prepare_booking(user, request, conversation_id, chat_state, seat_numbers=Non
     return {
         "event_id": event_id,
         "event_name": event.name,
-        "seat_numbers": seat_numbers,
+        **EventService.describe_seats(event, seat_numbers),
         "status": "awaiting_confirmation",
         "amount": str(
             event.price * len(seat_numbers)
@@ -157,7 +166,7 @@ def prepare_payment_retry(user, request, booking_id):
     return {
         "booking_id": booking.id,
         "event_name": booking.event.name,
-        "seat_numbers": [bs.seat.seat_number for bs in booking.booking_seats.all()],
+        **booking.seat_display(),
         "amount": str(booking.amount),
         "status": "awaiting_retry_confirmation",
     }
@@ -189,7 +198,7 @@ def prepare_cancel_booking(user, booking_id):
     return {
         "booking_id": booking.id,
         "event_name": booking.event.name,
-        "seat_numbers": [bs.seat.seat_number for bs in booking.booking_seats.all()],
+        **booking.seat_display(),
         "amount": str(booking.amount),
         "status": "awaiting_cancellation_confirmation",
     }

@@ -103,8 +103,9 @@ def get_system_prompt(user=None, request=None, chat_state=None):
             selected_event_info = f"""
             - Current selected event: {selected_event.name}
             - Current selected event ID: {selected_event.id}
-            prepare_booking uses this server-side event. Pass seat_numbers for
-            labeled events, or quantity for general admission events.
+            prepare_booking uses this server-side event. Pass seat_labels for
+            labeled events (exact labels from get_available_seats, e.g.
+            ["A1", "B4"]), or quantity for general admission events.
             """
 
     system_prompt = f"""
@@ -146,15 +147,20 @@ def get_system_prompt(user=None, request=None, chat_state=None):
         and do NOT ask the user to pick seats — tell them how many tickets
         are available and ask how many they want.
         Otherwise, don't print the seats as a list — use a grid format
-        (10 columns and N rows) to display the available seats.
+        (10 columns and N rows) showing each seat's label field (e.g. "A1"),
+        never its seat_number. seat_number is an internal id — never show it
+        or ask the user for it.
         Always call get_available_seats again before telling the user which
-        seats are available or accepting seat numbers/quantity for a new booking,
+        seats are available or accepting seat labels/quantity for a new booking,
         even if you already showed this earlier in this conversation.
         Availability can change between messages — never reuse a previous
         seats list or count from memory.
-        3. For labeled events, ask which seats they want and pass seat_numbers
-        to prepare_booking. For general admission events, ask how many
-        tickets they want and pass quantity to prepare_booking.
+        3. For labeled events, ask which seats they want and pass seat_labels
+        to prepare_booking — the exact label strings from get_available_seats
+        (e.g. ["A1", "B4"]), never a seat_number, and never a label you have
+        not actually seen returned by get_available_seats in this conversation.
+        For general admission events, ask how many tickets they want and pass
+        quantity to prepare_booking.
         4. Call prepare_booking.
         5. Show the booking summary.
         6. Do not ask the user to type "yes" or another confirmation message.
@@ -172,7 +178,7 @@ def get_system_prompt(user=None, request=None, chat_state=None):
            booking, call prepare_payment_retry for it directly — do not ask
            the user to choose between its individual seats.
         4. If there truly is more than one eligible booking (e.g. two failed
-           bookings for the same event), list seat numbers and booking id for
+           bookings for the same event), list seat labels and booking id for
            each match and ask the user to pick — never guess which one they mean.
         5. Never claim the payment was retried — only a click on the displayed
            Retry Payment Now control actually attempts it.
@@ -190,7 +196,7 @@ def get_system_prompt(user=None, request=None, chat_state=None):
            prepare_cancel_booking for it directly — do not ask the user to
            choose between its individual seats.
         4. If there truly is more than one matching booking (e.g. two bookings
-           for the same event), list seat numbers and booking id for each
+           for the same event), list seat labels and booking id for each
            match and ask the user to pick — never guess which one they mean.
         5. Never claim the booking was cancelled — only a click on the displayed
            Confirm Cancellation control actually cancels it.

@@ -60,15 +60,29 @@ class EventSummarySerializer(serializers.ModelSerializer):
 
 
 class SeatSummarySerializer(serializers.ModelSerializer):
-    """Minimal seat shape for the AI assistant's get_available_seats tool.
+    """
+    Minimal seat shape for the AI assistant's get_available_seats tool.
     Only used for labeled events — general admission events return a plain
-    count instead (see ai_assistant/tools/event_tools.py)."""
+    count instead (see ai_assistant/tools/event_tools.py).
+
+    `label` is always present, falling back to the plain seat_number for
+    a custom event with no Space (no display_label). This is what the
+    model shows the user and what prepare_booking expects back — it
+    never has to compute or guess a label-to-seat_number mapping itself,
+    it only ever echoes back a label it was already shown.
+    """
+    label = serializers.SerializerMethodField()
+
     class Meta:
         model = Seat
         fields = [
             'id',
             'seat_number',
+            'label',
         ]
+
+    def get_label(self, obj):
+        return obj.display_label or str(obj.seat_number)
 
 
 class EventWriteSerializer(serializers.ModelSerializer):

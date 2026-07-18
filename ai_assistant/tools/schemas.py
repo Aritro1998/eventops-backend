@@ -169,9 +169,13 @@ PREPARE_BOOKING_TOOL = {
             "Prepare or replace a pending booking before final confirmation. "
             "Call this when the user chooses seats for a new booking, or when an existing "
             "pending booking exists and the user asks to change the seats. "
-            "For labeled/reserved-seating events, pass seat_numbers. For general "
-            "admission events (get_available_seats returned general_admission: true), "
-            "pass quantity instead — never ask a general admission user to pick seats. "
+            "For labeled/reserved-seating events, pass seat_labels — the exact "
+            "label strings shown in get_available_seats's seats list (e.g. "
+            "['A1', 'B4']), never a seat_number, and never a label you have "
+            "not actually seen returned by get_available_seats in this "
+            "conversation. For general admission events (get_available_seats "
+            "returned general_admission: true), pass quantity instead — "
+            "never ask a general admission user to pick seats. "
             "After this tool succeeds, summarize the updated pending booking and direct the user "
             "to the displayed confirmation controls. "
             "Do not call this for affirmative confirmations like yes, confirm, proceed, or book it."
@@ -179,10 +183,10 @@ PREPARE_BOOKING_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "seat_numbers": {
+                "seat_labels": {
                     "type": "array",
-                    "items": {"type": "integer"},
-                    "description": "Specific seat numbers. Only for labeled/reserved-seating events."
+                    "items": {"type": "string"},
+                    "description": "Seat labels exactly as shown by get_available_seats (e.g. ['A1', 'B4']). Only for labeled/reserved-seating events."
                 },
                 "quantity": {
                     "type": "integer",

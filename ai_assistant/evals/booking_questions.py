@@ -13,10 +13,13 @@ def _book_one_seat_setup():
     from events.models import Event
     from events.services import EventService
     event = Event.objects.order_by("id").first()
+    # This event has no Space, so display_label is null and the seat's
+    # label falls back to its plain seat_number as a string — see
+    # SeatSummarySerializer.get_label.
     seat_number = EventService.get_available_seats(event.id).first().seat_number
     return {
         "prompt": f"Book seat {seat_number} for {event.name}",
-        "expected_tool_args_contains": {"seat_numbers": [seat_number]},
+        "expected_tool_args_contains": {"seat_labels": [str(seat_number)]},
     }
 
 
@@ -29,7 +32,7 @@ def _book_two_seats_setup():
     )
     return {
         "prompt": f"Book seats {seat_numbers[0]} and {seat_numbers[1]} for {event.name}",
-        "expected_tool_args_contains": {"seat_numbers": seat_numbers},
+        "expected_tool_args_contains": {"seat_labels": [str(sn) for sn in seat_numbers]},
     }
 
 
