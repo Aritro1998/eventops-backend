@@ -4,10 +4,31 @@ project (the API's EventViewSet still exists and works, but admin is where
 the space-aware seat generation actually gets exercised day to day).
 """
 
-from .models import Event, Seat
+from django import forms
 from django.contrib import admin
 from django.db import transaction
+
+from .models import Event, Seat
 from .services import EventService
+from venues.models import Space
+from core.admin_widgets import ChainedSelect
+
+
+class SpaceSelect(ChainedSelect):
+    """Only offer Spaces belonging to whichever Venue is currently
+    selected — see static/admin/chained_select.js for the client-side
+    filtering this drives."""
+    parent_field_id = "id_venue"
+
+    def get_parent_map(self):
+        return dict(Space.objects.values_list("id", "venue_id"))
+
+
+class EventAdminForm(forms.ModelForm):
+    class Meta:
+        model = Event
+        fields = "__all__"
+        widgets = {"space": SpaceSelect}
 
 
 @admin.register(Event)
@@ -18,14 +39,16 @@ class EventAdmin(admin.ModelAdmin):
     save_model below is about to overwrite it with the space's real
     capacity. In practice this just means typing any positive placeholder
     number (e.g. 1) when picking a space; it gets replaced automatically.
-    Making the field optional/hidden when a space is chosen would need
-    custom admin form JS — not done here, noted as a rough edge.
     """
+    form = EventAdminForm
     list_display = ["id", "name", "venue", "space", "start_time", "end_time", "total_seats", "price", "is_archived"]
     list_filter = ["venue", "is_archived"]
     search_fields = ["name"]
     list_display_links = ["id", "name"]
     actions = ["archive_events"]
+
+    class Media:
+        js = ["admin/chained_select.js"]
 
     def archive_events(self, request, queryset):
         """

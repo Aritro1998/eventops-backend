@@ -28,6 +28,7 @@ class BookingSeatAdmin(admin.ModelAdmin):
     list_display = [
         "id", "booking", "seat", "is_active",
     ]
+    list_display_links = ["id", "booking"]
     list_filter = ["is_active"]
     search_fields = [
         "booking__user__username",

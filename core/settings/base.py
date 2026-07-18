@@ -195,6 +195,11 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+# For static assets not owned by any single app (e.g. shared admin JS) —
+# `core` itself isn't in INSTALLED_APPS (it's a plain shared-utilities
+# package, not a Django app), so its own static/ folder wouldn't be
+# discovered otherwise.
+STATICFILES_DIRS = [BASE_DIR / "static"]
 
 AUTH_USER_MODEL = "users.User"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
