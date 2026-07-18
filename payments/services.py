@@ -11,12 +11,37 @@ from bookings.services import BookingService
 logger = logging.getLogger(__name__)
 
 class PaymentService:
-    
+    """Simulated payment processing — see the module docstring in
+    payments/models.py for why. process_payment is the single entry point
+    used by both a fresh booking (BookingService.create_booking_for_user)
+    and a manual retry (the AI assistant's payment-retry flow, or
+    BookingRetryPaymentView)."""
+
     MAX_RETRIES = 3
 
     @staticmethod
     def process_payment(booking_id):
+        """
+        Attempt (or re-attempt) payment for a booking. Coin-flip success/
+        failure since there's no real gateway (see class docstring).
 
+        State machine, in order of precedence:
+        1. Booking already expired, or already hit MAX_RETRIES -> booking
+           becomes EXPIRED, seats released, raises ValueError. No payment
+           attempt happens at all.
+        2. Booking already CONFIRMED -> idempotent no-op, returns the
+           existing successful Payment without touching anything.
+        3. Otherwise, attempt payment:
+           - success -> Payment SUCCESS, Booking CONFIRMED.
+           - failure -> retry_count += 1; Booking becomes EXPIRED if that
+             was the last allowed retry (or the hold already expired),
+             otherwise FAILED (still retriable by calling this again).
+
+        The whole thing runs under a row lock on the Booking (and, once
+        created, the Payment) so two retry-payment clicks racing each
+        other can't both succeed or both increment retry_count past the
+        limit.
+        """
         # success = random.choice([True] * 9 + [False])
         success = random.choice([True, False])
         error_message = None

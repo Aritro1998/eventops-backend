@@ -294,6 +294,17 @@ class BookingService:
 
     @staticmethod
     def create_booking_for_user(user, event, seat_ids, idempotency_key=None):
+        """
+        Higher-level wrapper around create_booking, used by the AI
+        assistant's confirm_pending_booking action. Adds two things
+        create_booking doesn't do itself: an unlocked fast-path
+        idempotency check (create_booking still does the real,
+        lock-protected one — this just avoids unnecessary work on a
+        confirmed retry), and immediately kicking off payment processing
+        for a freshly-created PENDING booking. create_booking stays lower-
+        level and reusable (e.g. directly from BookingWriteSerializer)
+        without forcing payment processing on every caller.
+        """
         # Fast idempotency check (no locking)
         if idempotency_key:
             existing = BookingService.get_existing_booking(user, idempotency_key)
@@ -378,6 +389,9 @@ class BookingService:
     
     @staticmethod
     def get_user_bookings(user, status_filter=None):
+        """All bookings for a user, optionally narrowed to one status.
+        Used by both the API's booking-list endpoint and the AI
+        assistant's get_my_bookings tool."""
         bookings = Booking.objects\
                     .filter(user=user)\
                     .select_related("event", "payment")\

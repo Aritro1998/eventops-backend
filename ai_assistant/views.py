@@ -1,3 +1,21 @@
+"""
+Two chat entry points exist: ChatView (request/response) and
+ChatStreamView (Server-Sent Events). The real frontend (gradio_app.py)
+calls chat_stream/ChatStreamView exclusively, for token-by-token
+streaming — ChatView/chat() still works and is kept for any client that
+wants a simple single-response call, but it is not what production
+traffic actually uses.
+
+Everything below ChatStreamView is one APIView per confirm/dismiss button
+a Pending* draft can show (see ai_assistant/models.py's module docstring
+for the propose-vs-execute design these exist to support). Each one:
+calls its action function (ai_assistant/actions/), builds a human-readable
+response_text, persists that text into the chat's own history via
+persist_action_outcome so a later message in the same conversation has
+context for "what just happened", and returns the fresh list of any
+still-pending actions.
+"""
+
 import json
 import logging
 from .chat_state import ChatState

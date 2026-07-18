@@ -1,3 +1,10 @@
+"""
+Booking HTTP endpoints. Every view here is intentionally thin — all the
+actual locking/idempotency/validation logic lives in BookingService, these
+views just translate HTTP <-> service calls and turn ValueErrors into
+400 responses.
+"""
+
 import logging
 
 from rest_framework import status
@@ -69,6 +76,10 @@ class BookingListView(APIView):
                 idempotency_key=request.data.get("idempotency_key")
             )
         except OperationalError:
+            # Surfaces as a clean 503 rather than an unhandled 500 when the
+            # row lock in BookingService.create_booking can't be acquired
+            # (e.g. heavy concurrent demand for the same seat) — the client
+            # is told to retry rather than seeing a generic server error.
             logger.warning(
                 "booking_create_database_contention",
                 extra={

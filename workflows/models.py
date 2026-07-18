@@ -1,10 +1,25 @@
+"""
+A WorkflowJob is a durable, retryable record of "something needs to happen
+asynchronously" — currently used for booking-expiry timers and
+confirmation emails. It's a DB row, not just a Celery task, specifically
+so retries survive a worker crash: workflows/tasks.py's
+requeue_pending_jobs_task (see CELERY_BEAT_SCHEDULE in settings) scans for
+jobs stuck in PENDING/IN_PROGRESS and re-dispatches them, something a
+bare Celery task with no DB record can't recover from.
+"""
+
 from django.db import models
 from django.db.models import Q
 
 from bookings.models import Booking
 
-# Create your models here.
+
 class WorkflowJob(models.Model):
+    """`job_type` is a free-text label (not an FK/enum) matched against in
+    workflows/tasks.py's process_workflow_job dispatcher — see that file
+    for the actual set of handled types (e.g. BOOKING_EXPIRY,
+    BOOKING_CONFIRMATION). `payload` carries whatever that handler needs,
+    shaped differently per job_type."""
 
     STATUS_CHOICES = [
         ('PENDING', 'Pending'),

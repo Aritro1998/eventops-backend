@@ -1,3 +1,14 @@
+"""
+Celery task definitions. process_workflow_job is the actual worker for
+WorkflowJob rows (dispatches by job_type to the handle_* functions at the
+bottom of this file); the four *_task functions below it are what
+CELERY_BEAT_SCHEDULE (core/settings/base.py) fires every 5 minutes —
+requeue_pending_jobs_task recovers stuck WorkflowJobs, the three
+cleanup_expired_* tasks garbage-collect the AI assistant's PendingBooking/
+PendingBookingCancellation/PendingPaymentRetry rows that nobody confirmed
+in time.
+"""
+
 import logging
 
 from celery import shared_task
@@ -229,8 +240,18 @@ def handle_booking_confirmation(job):
     email = job.payload.get("email")
     booking_id = job.payload.get("booking_id")
     event_name = job.payload.get("event_name", "Event")
-    seat_numbers = job.payload.get("seat_numbers", [])
     event_time = job.payload.get("event_time", "TBD")
+
+    # is_general_admission/seat_labels/seat_count come from
+    # Booking.seat_display() (see bookings/signals.py) — general
+    # admission bookings have no individual seat identity to show, only
+    # a ticket count. Defaults here cover any already-queued job from
+    # before this payload shape existed.
+    is_general_admission = job.payload.get("is_general_admission", False)
+    seat_labels = job.payload.get("seat_labels", [])
+    seat_count = job.payload.get("seat_count", len(seat_labels))
+    seat_summary = f"{seat_count} ticket(s)" if is_general_admission else ", ".join(seat_labels)
+    seat_row_label = "Tickets" if is_general_admission else "Seat"
 
     if not email:
         raise ValueError("Email not found in payload")
@@ -241,7 +262,7 @@ def handle_booking_confirmation(job):
     Your booking is confirmed.
 
     Event: {event_name}
-    Seat: {", ".join(map(str, seat_numbers))}
+    {seat_row_label}: {seat_summary}
     Time: {event_time}
     Booking ID: {booking_id}
     """
@@ -260,8 +281,8 @@ def handle_booking_confirmation(job):
                         <td style="padding: 8px;">{event_name}</td>
                     </tr>
                     <tr>
-                        <td style="padding: 8px; font-weight: bold;">Seat</td>
-                        <td style="padding: 8px;">{", ".join(map(str, seat_numbers))}</td>
+                        <td style="padding: 8px; font-weight: bold;">{seat_row_label}</td>
+                        <td style="padding: 8px;">{seat_summary}</td>
                     </tr>
                     <tr>
                         <td style="padding: 8px; font-weight: bold;">Time</td>

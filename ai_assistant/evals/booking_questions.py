@@ -1,3 +1,14 @@
+"""
+Eval questions covering booking/cancellation/retry conversations. The
+last three questions here (cancel_needs_lookup_first,
+retry_needs_lookup_first) exist specifically to verify the model asks
+get_my_bookings for a booking id rather than guessing one when it isn't
+given — the same "don't let it guess an identifier" principle the
+searched_event_ids guardrail enforces on the discovery side, checked here
+at the conversational level instead of via a code-level allowlist.
+"""
+
+
 def _book_one_seat_setup():
     from events.models import Event
     from events.services import EventService

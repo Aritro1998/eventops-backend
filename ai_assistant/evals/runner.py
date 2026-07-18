@@ -1,3 +1,25 @@
+"""
+A minimal LLM eval harness — not a testing framework in the pytest sense,
+but the same idea: run real prompts through the real production code path
+(chat_stream, not a mock) and assert on the outcome, because an LLM's
+correctness is genuinely different to verify than deterministic code —
+the same prompt at temperature=0 can still occasionally take a different
+tool-calling path (this is exactly how this project caught and fixed two
+intermittent reliability bugs, not through code review alone).
+
+A "question" dict (see discovery_questions.py/booking_questions.py) can
+declare any combination of:
+- expected_tool: a tool name that must appear somewhere in the turn's
+  tool_call_log
+- expected_tool_args_contains: a dict of args that some call to
+  expected_tool must have included
+- expected_content_contains: substrings the final response text must
+  contain
+- setup: a callable returning the above dynamically at run time, for
+  questions that depend on live data (a real event name/seat number)
+  rather than hardcoded values that would go stale as fixtures change.
+"""
+
 from ai_assistant.chat_state import ChatState
 from ai_assistant.services import AIAssistantService
 
@@ -66,6 +88,9 @@ def run_eval(question, user):
 
 
 def run_eval_suite(questions, user):
+    """Run every question in a list (see discovery_questions.py's
+    DISCOVERY_QUESTIONS / booking_questions.py's BOOKING_QUESTIONS) and
+    summarize pass/fail counts."""
     results = [run_eval(q, user) for q in questions]
     passed = sum(1 for r in results if r["passed"])
     return {"total": len(results), "passed": passed, "failed": len(results) - passed, "results": results}

@@ -1,4 +1,14 @@
+"""
+The execute half of "propose vs execute" for bookings — every function
+here is called from a dedicated action view (ai_assistant/views.py),
+triggered only by a human clicking a real button, never by the AI
+directly. get_pending_booking_actions/get_pending_booking_draft are also
+read by the chat views themselves, so the frontend always knows whether
+to show the Confirm/Cancel controls.
+"""
+
 from events.models import Event, Seat
+from events.services import EventService
 from payments.services import PaymentService
 from bookings.services import BookingService
 from ai_assistant.models import PendingBooking
@@ -33,7 +43,9 @@ def get_pending_booking_draft(user):
 
     return {
         "event_name": pending.event.name,
-        "seat_numbers": pending.seat_numbers,
+        # Presentation only — see EventService.describe_seats. Identity
+        # for confirmation still lives on pending.seat_numbers.
+        **EventService.describe_seats(pending.event, pending.seat_numbers),
         "amount": str(pending.amount),
         "event_start_time": pending.event.start_time.isoformat(),
     }
@@ -82,7 +94,7 @@ def confirm_pending_booking(user):
     return {
         "booking_id": booking.id,
         "event_name": event.name,
-        "seat_numbers": seat_numbers,
+        **EventService.describe_seats(event, seat_numbers),
         "status": booking.status,
         "amount": str(booking.amount),
         "is_existing": is_existing,
@@ -101,11 +113,11 @@ def cancel_pending_booking_draft(user):
         raise ValueError("No pending booking found")
 
     event_name = pending.event.name
-    seat_numbers = pending.seat_numbers
+    seat_display = EventService.describe_seats(pending.event, pending.seat_numbers)
     pending.delete()
 
     return {
         "event_name": event_name,
-        "seat_numbers": seat_numbers,
+        **seat_display,
         "status": "cancelled",
     }

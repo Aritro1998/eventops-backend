@@ -1,3 +1,10 @@
+"""
+Plain functions rather than a class-based *Service like the other apps —
+these are simple enough (two small queries, dispatch to Celery) that a
+class wrapper wouldn't add anything. Split from tasks.py so this logic
+can be imported without pulling in Celery's @shared_task machinery.
+"""
+
 from .models import WorkflowJob
 from django.utils import timezone
 
@@ -30,6 +37,9 @@ def requeue_pending_jobs():
 
 
 def schedule_job(job, delay_seconds=0):
+    """Dispatch a freshly-created WorkflowJob to Celery, immediately or
+    after a delay (used by BookingService.create_booking to schedule a
+    BOOKING_EXPIRY job for exactly when the booking's hold runs out)."""
     from .tasks import process_workflow_job
 
     if delay_seconds > 0:

@@ -1,9 +1,24 @@
+"""
+Per-conversation state for the AI assistant, stored in Redis (via Django's
+cache backend) rather than a database table — it's genuinely disposable:
+a 30-minute TTL, no need to survive a server restart, and every AI
+service call reads/writes it on the hot path so a fast key-value store
+fits better than a DB round-trip. `selected_event_id` (server-side,
+opaque to the model) and `searched_event_ids` (an allowlist set by the
+search_events tool) are the two fields that exist specifically so the
+model can't hallucinate/guess an id — see ai_assistant/tools/event_tools.py.
+"""
+
 import uuid
 
 from django.core.cache import cache
 from rest_framework.exceptions import ValidationError, PermissionDenied
 
 class ChatState:
+    """Class of classmethods rather than instances — state itself is a
+    plain dict passed around explicitly (see chat_stream in services.py),
+    this class is just the Redis read/write/validation logic around it."""
+
     # Redis is temporary workflow state, not permanent user-visible history.
     TTL_SECONDS = 30 * 60
     MAX_HISTORY_MESSAGES = 12
@@ -64,6 +79,9 @@ class ChatState:
 
     @classmethod
     def save(cls, conversation_id, state):
+        """Persist state back to Redis and refresh its TTL — call this
+        after any mutation (tools that update selected_event_id or
+        searched_event_ids do this themselves)."""
         cache.set(cls._key(conversation_id), state, timeout=cls.TTL_SECONDS)
 
     @classmethod

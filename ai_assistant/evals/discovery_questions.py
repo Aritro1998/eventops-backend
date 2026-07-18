@@ -1,3 +1,13 @@
+"""
+Eval questions for read-only "discovery" conversations (browsing/searching
+events) — see runner.py's module docstring for the question-dict schema.
+The _*_setup functions all pull a real, currently-existing event at run
+time (Event.objects.order_by("id").first()) rather than hardcoding a name/
+id — a hardcoded event name would silently go stale and start failing for
+the wrong reason the moment test data changes.
+"""
+
+
 def _event_by_name_setup():
     from events.models import Event
     event = Event.objects.order_by("id").first()

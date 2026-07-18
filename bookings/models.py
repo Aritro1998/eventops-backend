@@ -1,3 +1,11 @@
+"""
+A Booking is one user's reservation for one or more Seats at an Event.
+Booking and BookingSeat are deliberately two tables (not seat_ids on
+Booking directly) so a single seat's claim can be tracked, locked, and
+released independently — see BookingSeat.is_active below for why that
+matters.
+"""
+
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
@@ -5,8 +13,15 @@ from django.utils import timezone
 from users.models import User
 from events.models import Event, Seat
 
-# Create your models here.
+
 class Booking(models.Model):
+    """
+    Status lifecycle: PENDING (just created, payment in flight) ->
+    CONFIRMED (payment succeeded) or FAILED (payment failed, retriable via
+    the AI assistant's prepare_payment_retry) or EXPIRED (nobody confirmed
+    in time — see workflows/tasks.py's cleanup task). A CONFIRMED booking
+    can later become CANCELLED by the user.
+    """
 
     STATUS_CHOICES = [
         ('CONFIRMED', 'Confirmed'),
@@ -25,9 +40,16 @@ class Booking(models.Model):
         db_index=True
     )
     amount = models.DecimalField(max_digits=10, decimal_places=2)
+    # Lets the same confirm-booking click be safely retried (e.g. a network
+    # blip and the user clicks Confirm twice) without creating two
+    # bookings — see BookingService.create_booking_for_user's idempotency
+    # check, and unique_idempotency_key_per_user below which enforces it.
     idempotency_key = models.CharField(max_length=255, blank=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    # For a PENDING booking, the deadline by which payment must be
+    # confirmed before it's treated as abandoned (see workflows/tasks.py).
+    # Meaningless once CONFIRMED/CANCELLED/FAILED.
     expires_at = models.DateTimeField(default=timezone.now)
     retry_count = models.IntegerField(default=0)
 
@@ -43,6 +65,30 @@ class Booking(models.Model):
         EXPIRED).
         """
         self.booking_seats.update(is_active=False)
+
+    def seat_display(self):
+        """
+        Presentation-only summary of this booking's seats — for showing
+        to a user or the AI (confirmation cards, emails, chat responses),
+        never for identity/lookup. Includes inactive seats too
+        (release_seats doesn't delete rows, so a cancelled booking's
+        history is still describable here).
+
+        Deliberately doesn't delegate to EventService.describe_seats:
+        that method looks up display_label by re-querying Seat, which
+        would waste a query here since booking_seats__seat is typically
+        already prefetched (see BookingService.get_user_bookings) — this
+        reads straight off the already-loaded Seat objects instead.
+        """
+        is_general_admission = self.event.is_general_admission
+        booking_seats = list(self.booking_seats.all())
+        return {
+            "is_general_admission": is_general_admission,
+            "seat_labels": [] if is_general_admission else [
+                bs.seat.display_label or str(bs.seat.seat_number) for bs in booking_seats
+            ],
+            "seat_count": len(booking_seats),
+        }
     
     class Meta:
         ordering = ['-created_at']
@@ -67,6 +113,13 @@ class Booking(models.Model):
         
 
 class BookingSeat(models.Model):
+    """Join row: one seat claimed by one booking. on_delete=PROTECT on
+    `seat` means Django refuses to delete a Seat (and therefore its
+    parent Event) while any BookingSeat still references it — including
+    inactive/historical ones, since PROTECT doesn't check is_active. In
+    practice this means an Event can't be deleted once it has ever had a
+    single booking, confirmed or not (verified directly; see the note on
+    EventViewSet.perform_destroy in events/views.py)."""
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="booking_seats")
     seat = models.ForeignKey(Seat, on_delete=models.PROTECT, related_name="booking_seats")
     # True while this row represents a live claim on the seat. Flipped to

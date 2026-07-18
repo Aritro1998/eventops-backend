@@ -3,6 +3,8 @@ from .models import Booking, BookingSeat
 
 
 class BookingSeatInline(admin.TabularInline):
+    """Shows a Booking's seats directly on its admin edit page instead of
+    requiring a separate lookup in BookingSeatAdmin below."""
     model = BookingSeat
     extra = 0
     autocomplete_fields = ["seat"]
@@ -15,10 +17,14 @@ class BookingAdmin(admin.ModelAdmin):
     search_fields = ["user__username"]
     list_display_links = ["id", "user", "event"]
     inlines = [BookingSeatInline]
-    
+
 
 @admin.register(BookingSeat)
 class BookingSeatAdmin(admin.ModelAdmin):
+    # is_active is the field that actually decides whether this row still
+    # holds a live claim on its seat (see BookingSeat's docstring) —
+    # surfaced here so a stuck/conflicting seat claim can be inspected
+    # directly without digging through Booking history.
     list_display = [
         "id", "booking", "seat", "is_active",
     ]

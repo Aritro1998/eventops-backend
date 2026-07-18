@@ -6,7 +6,14 @@ from events.serializers import EventSummarySerializer, SeatSummarySerializer
 from payments.serializers import PaymentReadSerializer
 
 class BookingWriteSerializer(serializers.ModelSerializer):
-    
+    """
+    Accepts a list of Seat ids for a given event. This only validates
+    shape (seats belong to the event, no duplicates) — it does NOT check
+    availability; that's BookingService's job under a row lock, since
+    availability can change between this validation and the actual write
+    (see BookingService.create_booking).
+    """
+
     seats = serializers.PrimaryKeyRelatedField(
         queryset=Seat.objects.all(),
         many=True,
@@ -43,6 +50,9 @@ class BookingWriteSerializer(serializers.ModelSerializer):
 
 
 class BookingSeatReadSerializer(serializers.ModelSerializer):
+    """Thin wrapper so BookingReadSerializer.seats returns Seat details
+    (via the nested SeatSummarySerializer) rather than raw BookingSeat
+    join-row fields like is_active."""
     seat = SeatSummarySerializer(read_only=True)
 
     class Meta:
@@ -53,9 +63,23 @@ class BookingSeatReadSerializer(serializers.ModelSerializer):
 
 
 class BookingReadSerializer(serializers.ModelSerializer):
+    """The shape returned by get_my_bookings, and the booking-detail API.
+    `source="booking_seats"` reads through the join table but only shows
+    every seat currently linked — including inactive/historical ones,
+    since this doesn't filter on is_active. Callers that only want live
+    seats should filter separately.
+
+    is_general_admission/seat_labels/seat_count (via Booking.seat_display)
+    are what the AI assistant's system prompt is told to use when
+    describing a booking — `seats` alone would show raw seat_number
+    values that mean nothing for a general admission booking.
+    """
     event = EventSummarySerializer(read_only=True)
     payment = PaymentReadSerializer(read_only=True)
     seats = BookingSeatReadSerializer(source="booking_seats", many=True, read_only=True)
+    is_general_admission = serializers.SerializerMethodField()
+    seat_labels = serializers.SerializerMethodField()
+    seat_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -67,6 +91,18 @@ class BookingReadSerializer(serializers.ModelSerializer):
             'status',
             'amount',
             'created_at',
+            'is_general_admission',
+            'seat_labels',
+            'seat_count',
         ]
         read_only_fields = fields
+
+    def get_is_general_admission(self, obj):
+        return obj.seat_display()["is_general_admission"]
+
+    def get_seat_labels(self, obj):
+        return obj.seat_display()["seat_labels"]
+
+    def get_seat_count(self, obj):
+        return obj.seat_display()["seat_count"]
         

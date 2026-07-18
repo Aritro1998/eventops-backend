@@ -1,3 +1,11 @@
+"""
+Admin-only monitoring/ops endpoints for the WorkflowJob system (see
+workflows/models.py and workflows/tasks.py) — browsing jobs, spotting
+stuck/failed ones, and manually requeuing a failed job. All require
+IsRoleAdmin (core/permissions.py) — this is an operational surface, not
+something regular users or organizers touch.
+"""
+
 import logging
 
 from datetime import UTC, datetime, time, timedelta
@@ -21,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 
 def utc_day_bounds(date_value):
+    """Turn a date into a (start, end) datetime range covering that whole
+    day in UTC — used by the created_date query param filters below."""
     start = datetime.combine(date_value, time.min, tzinfo=UTC)
     end = datetime.combine(date_value, time.max, tzinfo=UTC)
     return start, end
@@ -57,6 +67,8 @@ class WorkflowJobListView(ListAPIView):
 
 
 class WorkflowJobDetailView(RetrieveAPIView):
+    """Single job by id — for drilling into a specific job's payload/
+    result/last_error found via the list/stuck/failed views above."""
     permission_classes = [IsRoleAdmin]
     queryset = WorkflowJob.objects.all()
     serializer_class = WorkflowJobSerializer
@@ -108,6 +120,10 @@ class FailedJobsView(ListAPIView):
 class RetryJobView(APIView):
     """
     Reset a failed job back to PENDING so the worker can attempt it again.
+    Clears retry_count/last_error/timestamps back to a fresh-job state
+    rather than just flipping status, so process_workflow_job's own
+    retry-limit logic doesn't immediately re-fail it as already
+    exhausted.
     """
     permission_classes = [IsRoleAdmin]
 

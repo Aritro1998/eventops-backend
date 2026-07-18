@@ -1,3 +1,30 @@
+"""
+The actual production chat frontend (see docker-compose.yml's `gradio`
+service) — a Gradio Blocks app that talks to the Django backend purely
+over HTTP, the same API any other client could use. Structure, top to
+bottom: URL/constant definitions, CSS, then four groups of plain
+functions (format_*/render_* build HTML strings for chat bubbles and
+cards, request_json/stream_chat_with_ai make the actual HTTP calls,
+login/register/logout handle auth, and the rest are Gradio event
+handlers), and finally the `with gr.Blocks(...)` block that declares the
+UI and wires each handler to a button/event.
+
+Gradio's model: gr.State holds values across interactions without a
+database (token_state, conversation_id_state, action_state below);
+component.click(fn=..., inputs=[...], outputs=[...]) wires a handler
+function's return values (in order) to update named components — the
+lengths and order of a handler's return tuple and its `outputs` list
+must match exactly, which is why several handlers below return long,
+positional tuples. A handler can also be a generator (yield instead of
+return) to push multiple UI updates over time — that's what makes the
+streamed chat reply visibly type itself out (see get_ai_response).
+
+Only chat/stream is actually used (DJANGO_STREAM_API_URL) — chat/
+(DJANGO_API_URL, non-streaming) is defined but not called anywhere in
+this file; see ai_assistant/views.py's module docstring for why that
+endpoint still exists.
+"""
+
 import json
 import gradio as gr
 import requests
@@ -240,8 +267,12 @@ CUSTOM_CSS = """
 }
 """
 
+# ---------- Formatting / HTML-card rendering helpers ----------
 
 def format_event_time(iso_string):
+    """ISO datetime string -> human-readable ("18 Jul 2026, 07:30 PM").
+    Falls back to returning the raw string unchanged if it doesn't parse,
+    rather than raising and breaking the whole card render."""
     try:
         dt = datetime.fromisoformat(iso_string)
     except (TypeError, ValueError):
@@ -267,7 +298,26 @@ def format_time_remaining(iso_string):
     return f"~{minutes} min" if minutes >= 1 else "<1 min"
 
 
+def seat_display_row(data):
+    """
+    Shared (label, escaped value) row for the "which seats" line every
+    booking/draft/cancellation/retry card shows — data is expected to
+    carry is_general_admission/seat_labels/seat_count (see
+    Booking.seat_display / EventService.describe_seats on the backend).
+    General admission has no individual seat identity, only a count.
+    """
+    if data.get("is_general_admission"):
+        return ("Tickets", escape(str(data.get("seat_count", 0))))
+    return ("Seat", escape(", ".join(data.get("seat_labels", []))))
+
+
 def render_status_card(icon, accent, title, subtitle, rows):
+    """Shared HTML-card renderer — every render_*_card function below
+    (booking, draft, cancel-prepare, payment-retry-prepare) is really just
+    "pick an icon/color/title and a list of (label, value) rows" and calls
+    through to this one. `rows` values are expected to already be
+    HTML-escaped by the caller (see the render_*_card functions using
+    `escape()` on every value before passing it in)."""
     rows_html = "".join(
         f"<tr>"
         f"<td style='padding:6px 0;color:var(--body-text-color-subdued);'>{label}</td>"
@@ -303,8 +353,10 @@ BOOKING_STATUS_CARD_STYLES = {
 
 
 def render_booking_card(booking):
+    """Card shown after a confirm/cancel/retry action resolves — style and
+    copy driven entirely by booking["status"], via BOOKING_STATUS_CARD_STYLES
+    above."""
     status = booking.get("status", "")
-    seats = ", ".join(str(s) for s in booking.get("seat_numbers", []))
 
     if status in BOOKING_STATUS_CARD_STYLES:
         icon, accent, title, subtitle = BOOKING_STATUS_CARD_STYLES[status]
@@ -316,7 +368,7 @@ def render_booking_card(booking):
 
     rows = [
         ("Event", escape(booking.get("event_name", ""))),
-        ("Seat", escape(seats)),
+        seat_display_row(booking),
         ("Time", escape(format_event_time(booking.get("event_start_time", "")))),
         ("Amount", f"₹{escape(booking.get('amount', ''))}"),
         ("Booking ID", escape(str(booking.get("booking_id", "")))),
@@ -335,10 +387,12 @@ def render_booking_card(booking):
 
 
 def render_draft_card(draft):
-    seats = ", ".join(str(s) for s in draft.get("seat_numbers", []))
+    """Shown when the AI just staged a new/replacement booking
+    (prepare_booking ran this turn) — replaces the assistant's chat bubble
+    with this card so the user sees exactly what they're about to confirm."""
     rows = [
         ("Event", escape(draft.get("event_name", ""))),
-        ("Seat", escape(seats)),
+        seat_display_row(draft),
         ("Time", escape(format_event_time(draft.get("event_start_time", "")))),
         ("Amount", f"₹{escape(draft.get('amount', ''))}"),
     ]
@@ -356,10 +410,9 @@ def render_cancel_prepare_card(cancellation):
     # turn). Unlike render_draft_card, this includes the Booking ID — that's
     # the detail a user checks to catch the AI staging the wrong one of their
     # bookings (e.g. two bookings for the same event) before clicking confirm.
-    seats = ", ".join(str(s) for s in cancellation.get("seat_numbers", []))
     rows = [
         ("Event", escape(cancellation.get("event_name", ""))),
-        ("Seat", escape(seats)),
+        seat_display_row(cancellation),
         ("Time", escape(format_event_time(cancellation.get("event_start_time", "")))),
         ("Amount", f"₹{escape(cancellation.get('amount', ''))}"),
         ("Booking ID", escape(str(cancellation.get("booking_id", "")))),
@@ -378,10 +431,9 @@ def render_payment_retry_prepare_card(payment_retry):
     # ran this turn). Attempts Remaining and Expires In matter more here than
     # anywhere else in the app — a retry isn't guaranteed to succeed, so this
     # is the number that decides whether clicking is even worth it.
-    seats = ", ".join(str(s) for s in payment_retry.get("seat_numbers", []))
     rows = [
         ("Event", escape(payment_retry.get("event_name", ""))),
-        ("Seat", escape(seats)),
+        seat_display_row(payment_retry),
         ("Time", escape(format_event_time(payment_retry.get("event_start_time", "")))),
         ("Amount", f"₹{escape(payment_retry.get('amount', ''))}"),
         ("Booking ID", escape(str(payment_retry.get("booking_id", "")))),
@@ -398,6 +450,8 @@ def render_payment_retry_prepare_card(payment_retry):
 
 
 def render_profile_card(username):
+    """Small sidebar card shown once logged in — just an avatar initial
+    and the username, swapped in for the login/register panel."""
     initial = escape(username[:1].upper()) if username else "?"
     return (
         "<div class='profile-card'>"
@@ -410,10 +464,15 @@ def render_profile_card(username):
 
 
 def render_error(text):
+    """Wrap an error string in the auth-error CSS class, or return an
+    empty string for a falsy/no-error input — Gradio's gr.HTML component
+    renders an empty string as nothing visible."""
     return f"<div class='auth-error'>{escape(text)}</div>" if text else ""
 
 
 def format_error(data):
+    """Flatten a DRF-style error payload (field -> [messages] or
+    field -> message) into one readable string for display."""
     if not isinstance(data, dict):
         return str(data)
 
@@ -426,7 +485,14 @@ def format_error(data):
     return "; ".join(parts)
 
 
+# ---------- HTTP calls to the Django backend ----------
+
 def request_json(url, token=None, payload=None):
+    """Shared POST helper for every non-streaming Django API call (login,
+    register, and every confirm/dismiss action button). Never raises for
+    network/JSON failures — always returns a dict, with an "error" key on
+    failure, so callers can use the same `.get("error")` check regardless
+    of what actually went wrong."""
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -498,7 +564,14 @@ def stream_chat_with_ai(message, token, conversation_id):
             yield "error", event.get("message", "Something went wrong.")
 
 
+# ---------- Auth click handlers ----------
+
 def login(username, password):
+    """Gradio click handler for the Log In button. The long return tuples
+    here map positionally onto `auth_outputs` (token, profile card,
+    guest/profile/quick-actions panel visibility) plus the login form's
+    own error/password-field outputs — see login_btn.click(...) near the
+    bottom of this file for the exact output list they must match."""
     data = request_json(
         DJANGO_LOGIN_URL,
         payload={"username": username, "password": password},
@@ -528,6 +601,9 @@ def login(username, password):
 
 
 def register(username, email, password):
+    """Click handler for Create Account — on success, logs the new user
+    in immediately by delegating to login() rather than duplicating its
+    return-tuple shape."""
     if not username or not email or not password:
         return (
             None,
@@ -558,6 +634,14 @@ def register(username, email, password):
 
 
 def action_updates(actions):
+    """
+    Translate the backend's flat `actions` list (each a {"type": ...,
+    "label": ...} dict) into gr.update() visibility toggles for every
+    action button/row in the UI. Called after every chat turn and every
+    action-button click so the buttons shown always match what the
+    backend currently reports as pending — never left stale from a
+    previous turn.
+    """
     # Three independent action "families" can appear in the same list at
     # once — a leftover seat draft, a staged cancellation, and a staged
     # payment retry are all unrelated bookings and can coexist — so each
@@ -585,6 +669,8 @@ def action_updates(actions):
 
 
 def logout():
+    """Reset auth state, chat history, and every action row back to a
+    fresh-visit state."""
     return (
         None,
         "",
@@ -597,6 +683,8 @@ def logout():
     )
 
 
+# ---------- Chat event handlers ----------
+
 def add_user_message(message, history):
     # Runs instantly (no network call) so the user's own message appears
     # right away instead of waiting alongside the AI's reply.
@@ -606,6 +694,13 @@ def add_user_message(message, history):
 
 
 def get_ai_response(history, token, conversation_id, current_actions):
+    """
+    Generator that drives the streamed chat reply — a plain `return` here
+    would give Gradio one final UI state; `yield`-ing repeatedly instead
+    is what makes the chatbot visibly grow the assistant's reply chunk by
+    chunk as stream_chat_with_ai produces them, rather than the message
+    popping in all at once when the whole response finally finishes.
+    """
     # Nothing to do if add_user_message skipped an empty message.
     if not history or history[-1]["role"] != "user":
         yield history, conversation_id, *action_updates(current_actions)
@@ -662,6 +757,13 @@ def get_ai_response(history, token, conversation_id, current_actions):
 
 
 def run_draft_action(url, token, history, current_actions, conversation_id, action_label):
+    """
+    Shared handler behind every confirm/dismiss button (Confirm booking,
+    Cancel draft, Confirm Cancellation, Keep Booking, Retry Payment Now,
+    Not Now) — each just calls this with its own action URL and button
+    label; see the .click(...) wiring near the bottom of this file for
+    which button maps to which URL/label pair.
+    """
     # Log the click as its own chat turn so it visually separates the prior
     # assistant message from the outcome, instead of both sharing one bubble.
     history = history + [{"role": "user", "content": action_label}]
@@ -683,6 +785,14 @@ def run_draft_action(url, token, history, current_actions, conversation_id, acti
     return history, *action_updates(actions)
 
 
+# ---------- UI layout + wiring ----------
+# Everything below declares the actual page (sidebar, chatbot, buttons)
+# and binds each interaction to one of the handler functions above via
+# .click()/.submit(). gr.State components hold values (auth token,
+# conversation id, pending actions) across interactions without a
+# database, since this frontend is intentionally stateless server-side —
+# all real state lives in Django/Redis, this just carries the handles to
+# it (token, conversation_id) between one browser interaction and the next.
 with gr.Blocks(
     title="EventOps AI Assistant",
     theme=gr.themes.Soft(),

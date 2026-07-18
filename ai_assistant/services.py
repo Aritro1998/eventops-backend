@@ -1,3 +1,17 @@
+"""
+The AI assistant's core: builds the system prompt (get_system_prompt) and
+runs the OpenAI tool-calling loop (AIAssistantService). This is where the
+model's tools (ai_assistant/tools/) actually get invoked, and where the
+"propose vs execute" safety rules from ai_assistant/models.py get
+reinforced in plain English so the model doesn't claim an action happened
+that it didn't actually call a tool for.
+
+MAX_TOOL_CALLS bounds one turn's tool-calling loop — if the model somehow
+never settles on a plain-text answer within that many rounds (a runaway
+loop, or genuine confusion), the loop gives up with a visible error
+instead of hanging or looping forever.
+"""
+
 import json
 import logging
 
@@ -7,6 +21,7 @@ from django.utils import timezone
 from core.settings.base import OPENAI_API_KEY
 from ai_assistant.chat_state import ChatState
 from ai_assistant.models import PendingBooking
+from events.services import EventService
 from ai_assistant.tools.registry import TOOL_REGISTRY
 from ai_assistant.actions.booking_actions import get_pending_booking_draft
 from ai_assistant.actions.payment_actions import get_pending_payment_retry_draft
@@ -18,6 +33,17 @@ MAX_TOOL_CALLS = 5
 
 
 def get_system_prompt(user=None, request=None, chat_state=None):
+    """
+    Rebuilt fresh on every call (not cached) since it embeds live,
+    per-request state: the current time, whether there's a pending
+    booking draft right now, and which event (if any) is currently
+    selected in this conversation's server-side chat_state. Baking these
+    into the prompt text, rather than making the model track them itself,
+    is what makes the guardrails elsewhere (chat_state's
+    selected_event_id/searched_event_ids allowlist) actually enforceable —
+    the model is told the ground truth every single turn instead of being
+    trusted to remember it correctly.
+    """
     now = timezone.localtime()
 
     if user and user.is_authenticated:
@@ -34,6 +60,12 @@ def get_system_prompt(user=None, request=None, chat_state=None):
         pending_booking = None
 
     if pending_booking:
+        seat_display = EventService.describe_seats(pending_booking.event, pending_booking.seat_numbers)
+        seats_text = (
+            f"{seat_display['seat_count']} ticket(s), general admission (no specific seats)"
+            if seat_display["is_general_admission"]
+            else ", ".join(seat_display["seat_labels"])
+        )
         pending_booking_info = f"""
             There is an existing pending booking draft. The interface displays
             Confirm booking and Cancel draft controls for it.
@@ -56,7 +88,7 @@ def get_system_prompt(user=None, request=None, chat_state=None):
             Pending booking details:
             - Event ID: {pending_booking.event.id}
             - Event Name: {pending_booking.event.name}
-            - Seats: {pending_booking.seat_numbers}
+            - Seats: {seats_text}
             - Amount: {pending_booking.amount}
         """
     else:
@@ -71,7 +103,8 @@ def get_system_prompt(user=None, request=None, chat_state=None):
             selected_event_info = f"""
             - Current selected event: {selected_event.name}
             - Current selected event ID: {selected_event.id}
-            prepare_booking uses this server-side event and accepts only seat numbers.
+            prepare_booking uses this server-side event. Pass seat_numbers for
+            labeled events, or quantity for general admission events.
             """
 
     system_prompt = f"""
@@ -87,6 +120,13 @@ def get_system_prompt(user=None, request=None, chat_state=None):
         bold field labels for multi-item results. A single item can still be
         described in plain sentences.
 
+        When describing any booking, draft, cancellation, or payment retry
+        (from prepare_booking, get_my_bookings, or any confirm/dismiss
+        result), check its is_general_admission field: if true, describe
+        it by seat_count (e.g. "3 tickets"), never by seat number — there
+        are no individual seats to name. If false, use seat_labels (e.g.
+        "A1, A2"), not raw seat numbers.
+
         When a user refers to an event by name rather than id, use the available tools to discover the event id. 
         Do not ask the user for internal ids if they can be found using tools.
         Always use available tools to retrieve the correct identifier before performing actions or 
@@ -101,14 +141,20 @@ def get_system_prompt(user=None, request=None, chat_state=None):
 
         When a booking request is made:
         1. Use search_events if needed.
-        2. Use get_available_seats. Don't print the seats as a list.
-        You must use a grid format (10 columns and N rows) to display the available seats.
+        2. Use get_available_seats.
+        If the result has general_admission: true, do NOT display a seat grid
+        and do NOT ask the user to pick seats — tell them how many tickets
+        are available and ask how many they want.
+        Otherwise, don't print the seats as a list — use a grid format
+        (10 columns and N rows) to display the available seats.
         Always call get_available_seats again before telling the user which
-        seats are available or accepting seat numbers for a new booking,
-        even if you already showed a seat list earlier in this conversation.
+        seats are available or accepting seat numbers/quantity for a new booking,
+        even if you already showed this earlier in this conversation.
         Availability can change between messages — never reuse a previous
-        seats list from memory.
-        3. Ask the user which seats they want. Pass seat numbers to prepare_booking.
+        seats list or count from memory.
+        3. For labeled events, ask which seats they want and pass seat_numbers
+        to prepare_booking. For general admission events, ask how many
+        tickets they want and pass quantity to prepare_booking.
         4. Call prepare_booking.
         5. Show the booking summary.
         6. Do not ask the user to type "yes" or another confirmation message.
@@ -191,6 +237,18 @@ def get_system_prompt(user=None, request=None, chat_state=None):
     return system_prompt
 
 class AIAssistantService:
+    """
+    Wraps the OpenAI client and runs the tool-calling conversation loop.
+    chat() and chat_stream() implement the same loop twice — once
+    buffered (returns one finished response) and once streamed (yields
+    pieces as OpenAI produces them) — because OpenAI's streaming and
+    non-streaming responses have a genuinely different shape to parse
+    (chat_stream has to reassemble tool-call fragments that arrive across
+    many chunks; chat() gets them whole). _run_tool is shared between the
+    two so the auth/kwargs/error-handling rules only exist in one place.
+    chat_stream is what the real frontend (gradio_app.py) actually calls.
+    """
+
     def __init__(self):
         self.client = OpenAI(api_key=OPENAI_API_KEY)
         
@@ -232,6 +290,13 @@ class AIAssistantService:
         return tool_result
 
     def chat(self, user_prompt, user=None, request=None, conversation_id=None, chat_state=None):
+        """
+        Non-streaming variant — kept working but not what production
+        traffic uses (see class docstring). Returns
+        (response_text, draft, cancellation, payment_retry) once the
+        model settles on a final plain-text answer, after running
+        whatever tool calls it requested along the way.
+        """
         # 1. Create the system prompt
         messages = [
             {

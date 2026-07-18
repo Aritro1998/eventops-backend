@@ -2,6 +2,9 @@ from django.contrib import admin
 from ai_assistant.models import PendingBooking, PendingBookingCancellation, PendingPaymentRetry
 
 
+# Mostly for debugging a specific user's stuck/confusing draft state — in
+# normal operation these rows are created/deleted by the AI tools and
+# action views (see ai_assistant/models.py's module docstring), not admin.
 @admin.register(PendingBooking)
 class PendingBookingAdmin(admin.ModelAdmin):
     list_display = ["id", "user", "event", "amount", "created_at", "expires_at"]

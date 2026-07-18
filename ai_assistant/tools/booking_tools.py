@@ -1,3 +1,10 @@
+"""
+Every prepare_* tool here follows the same shape: validate, then stage a
+Pending* row (never touch Booking/BookingSeat directly) — see
+ai_assistant/models.py's module docstring for why. Confirming a draft
+happens only through the dedicated action views in ai_assistant/views.py.
+"""
+
 import logging
 
 from events.models import Event, Seat
@@ -11,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 
 def get_my_bookings(user, status=None):
+    """The only read-only tool in this file — everything else here stages
+    a pending write."""
     logger.info(
         "ai_tool_get_my_bookings",
         extra={"event": "ai_tool_get_my_bookings", "user_id": user.id, "status": status}
@@ -20,7 +29,17 @@ def get_my_bookings(user, status=None):
     return serializer.data
 
 
-def prepare_booking(user, request, seat_numbers, conversation_id, chat_state):
+def prepare_booking(user, request, conversation_id, chat_state, seat_numbers=None, quantity=None):
+    """
+    Stage a booking draft for whichever event get_available_seats last
+    selected server-side. Branches entirely on event.is_general_admission:
+    GA events take `quantity` and auto-pick that many available seats
+    (their identities are never shown to the user); labeled events take
+    explicit `seat_numbers` and validate each one exists and is still
+    available. Either way, the result lands in PendingBooking.seat_numbers
+    in the same shape, so confirm_pending_booking (ai_assistant/actions/
+    booking_actions.py) doesn't need to know or care which path was taken.
+    """
     # get_available_seats stores this value in Redis. The model never supplies
     # an event ID here, so it cannot switch the booking to a guessed event.
     event_id = chat_state.get("selected_event_id")
@@ -34,39 +53,59 @@ def prepare_booking(user, request, seat_numbers, conversation_id, chat_state):
             "user_id": user.id,
             "event_id": event_id,
             "seat_numbers": seat_numbers,
+            "quantity": quantity,
         }
     )
 
-    # Reject duplicates before calculating the price or creating the draft.
-    if not seat_numbers or len(seat_numbers) != len(set(seat_numbers)):
-        raise ValueError("Choose at least one unique seat number.")
+    event = Event.objects.select_related('space').get(id=event_id)
 
-    event = Event.objects.get(id=event_id)
+    if event.is_general_admission:
+        if quantity is None or quantity <= 0:
+            raise ValueError("This is a general admission event. Specify a quantity of tickets, not seat numbers.")
+        if seat_numbers:
+            raise ValueError("This is a general admission event; specific seats cannot be chosen. Use quantity instead.")
 
-    # Confirm each requested number belongs to the currently selected event.
-    # Seat numbers are only unique within one event, not globally.
-    existing_seats = set(
-        Seat.objects.filter(
-            event=event,
-            seat_number__in=seat_numbers
-        ).values_list('seat_number', flat=True)
-    )
+        # Anonymous seats are picked here, not shown to the user — GA bookings
+        # only ever surface a ticket count, never seat identities.
+        seat_numbers = list(
+            EventService.get_available_seats(event.id).values_list('seat_number', flat=True)[:quantity]
+        )
+        if len(seat_numbers) < quantity:
+            raise ValueError(f"Only {len(seat_numbers)} tickets are available for {event.name}.")
+    else:
+        if not seat_numbers:
+            raise ValueError("Choose at least one seat number for this event.")
+        if quantity:
+            raise ValueError("This event uses specific seats, not a quantity. Provide seat_numbers instead.")
 
-    missing_seats = set(seat_numbers) - existing_seats
-    if missing_seats:
-        raise ValueError(f"Seats {sorted(missing_seats)} do not exist for {event.name}.")
+        # Reject duplicates before calculating the price or creating the draft.
+        if len(seat_numbers) != len(set(seat_numbers)):
+            raise ValueError("Choose at least one unique seat number.")
 
-    # This is an early user-facing availability check, not a reservation.
-    # BookingService repeats the check under row locks after confirmation,
-    # which prevents two users from booking the same seat concurrently.
-    available_seats = set(
-        EventService.get_available_seats(event.id)
-        .filter(seat_number__in=seat_numbers)
-        .values_list('seat_number', flat=True)
-    )
-    unavailable_seats = set(seat_numbers) - available_seats
-    if unavailable_seats:
-        raise ValueError(f"Seats {sorted(unavailable_seats)} are no longer available for {event.name}.")
+        # Confirm each requested number belongs to the currently selected event.
+        # Seat numbers are only unique within one event, not globally.
+        existing_seats = set(
+            Seat.objects.filter(
+                event=event,
+                seat_number__in=seat_numbers
+            ).values_list('seat_number', flat=True)
+        )
+
+        missing_seats = set(seat_numbers) - existing_seats
+        if missing_seats:
+            raise ValueError(f"Seats {sorted(missing_seats)} do not exist for {event.name}.")
+
+        # This is an early user-facing availability check, not a reservation.
+        # BookingService repeats the check under row locks after confirmation,
+        # which prevents two users from booking the same seat concurrently.
+        available_seats = set(
+            EventService.get_available_seats(event.id)
+            .filter(seat_number__in=seat_numbers)
+            .values_list('seat_number', flat=True)
+        )
+        unavailable_seats = set(seat_numbers) - available_seats
+        if unavailable_seats:
+            raise ValueError(f"Seats {sorted(unavailable_seats)} are no longer available for {event.name}.")
 
     # One user has one active draft. Choosing a different event or seat set
     # replaces the previous draft until the user explicitly confirms it.
@@ -92,6 +131,10 @@ def prepare_booking(user, request, seat_numbers, conversation_id, chat_state):
 
 
 def prepare_payment_retry(user, request, booking_id):
+    """Stage a retry for a FAILED/PENDING booking the user owns. The
+    actual payment attempt only happens when the human clicks the
+    displayed confirmation control — see stage_payment_retry's own
+    docstring in ai_assistant/actions/payment_actions.py."""
     logger.info(
         "ai_tool_prepare_payment_retry",
         extra={"event": "ai_tool_prepare_payment_retry", "user_id": user.id, "booking_id": booking_id}
@@ -121,6 +164,7 @@ def prepare_payment_retry(user, request, booking_id):
 
 
 def prepare_cancel_booking(user, booking_id):
+    """Stage a cancellation for a CONFIRMED booking the user owns."""
     logger.info(
         "ai_tool_prepare_cancel_booking",
         extra={"event": "ai_tool_prepare_cancel_booking", "user_id": user.id, "booking_id": booking_id}

@@ -1,3 +1,16 @@
+"""
+OpenAI function-calling tool schemas — one dict per tool, in the exact
+shape the OpenAI API expects. Unlike a normal docstring, every
+"description" string here isn't just documentation for a human reader —
+it's sent to the model as part of every request and directly shapes its
+behavior (when it decides to call this tool, what arguments it passes).
+That's why some of these read like instructions ("MANDATORY TOOL",
+"Never guess or default to the most recent match") rather than plain
+descriptions: this is prompt engineering, not just an API contract. Each
+schema pairs with its actual Python implementation via
+ai_assistant/tools/registry.py.
+"""
+
 from bookings.models import Booking
 
 GET_ALL_EVENTS_TOOL = {
@@ -156,6 +169,9 @@ PREPARE_BOOKING_TOOL = {
             "Prepare or replace a pending booking before final confirmation. "
             "Call this when the user chooses seats for a new booking, or when an existing "
             "pending booking exists and the user asks to change the seats. "
+            "For labeled/reserved-seating events, pass seat_numbers. For general "
+            "admission events (get_available_seats returned general_admission: true), "
+            "pass quantity instead — never ask a general admission user to pick seats. "
             "After this tool succeeds, summarize the updated pending booking and direct the user "
             "to the displayed confirmation controls. "
             "Do not call this for affirmative confirmations like yes, confirm, proceed, or book it."
@@ -165,12 +181,15 @@ PREPARE_BOOKING_TOOL = {
             "properties": {
                 "seat_numbers": {
                     "type": "array",
-                    "items": {
-                        "type": "integer"
-                    }
+                    "items": {"type": "integer"},
+                    "description": "Specific seat numbers. Only for labeled/reserved-seating events."
+                },
+                "quantity": {
+                    "type": "integer",
+                    "description": "Number of tickets. Only for general admission events."
                 }
             },
-            "required": ["seat_numbers"]
+            "required": []
         }
     }
 }

@@ -1,3 +1,12 @@
+"""
+Execute half of "propose vs execute" for payment retries — same structure
+as booking_actions.py/cancellation_actions.py, with one addition:
+stage_payment_retry is also called automatically (not just from the AI
+tool) right after a payment attempt fails, from confirm_pending_booking
+and confirm_payment_retry themselves, so the retry controls reappear
+without the user having to ask the AI again.
+"""
+
 from payments.services import PaymentService
 from ai_assistant.models import PendingPaymentRetry, get_pending_action_expiry
 
@@ -53,18 +62,18 @@ def get_pending_payment_retry_draft(user):
         return None
 
     booking = pending.booking
-    
+
     return {
         "booking_id": booking.id,
         "event_name": booking.event.name,
-        "seat_numbers": [bs.seat.seat_number for bs in booking.booking_seats.all()],
+        **booking.seat_display(),
         "amount": str(booking.amount),
         "event_start_time": booking.event.start_time.isoformat(),
         "expires_at": booking.expires_at.isoformat(),
         "attempts_remaining": max(0, PaymentService.MAX_RETRIES - booking.retry_count),
     }
-    
-    
+
+
 def confirm_payment_retry(user):
     """Actually attempt the payment again for the staged booking."""
     
@@ -93,8 +102,7 @@ def confirm_payment_retry(user):
         raise
     
     booking.refresh_from_db()
-    seat_numbers = [bs.seat.seat_number for bs in booking.booking_seats.all()]
-    
+
     if booking.status == "FAILED" and booking.retry_count < PaymentService.MAX_RETRIES:
         # Still eligible — replace the pending row so the buttons reappear
         # for another attempt, instead of leaving a stale one around.
@@ -102,11 +110,11 @@ def confirm_payment_retry(user):
     else:
         # CONFIRMED or EXPIRED — no more retries possible either way.
         pending.delete()
-        
+
     return {
         "booking_id": booking.id,
         "event_name": booking.event.name,
-        "seat_numbers": seat_numbers,
+        **booking.seat_display(),
         "status": booking.status,  # CONFIRMED, FAILED, or EXPIRED
         "amount": str(booking.amount),
         "event_start_time": booking.event.start_time.isoformat(),
@@ -124,13 +132,13 @@ def dismiss_payment_retry(user):
         raise ValueError("No pending payment retry found.")
     
     booking = pending.booking
-    seat_numbers = [bs.seat.seat_number for bs in booking.booking_seats.all()]
+    seat_display = booking.seat_display()
     pending.delete()
-    
+
     return {
         "booking_id": booking.id,
         "event_name": booking.event.name,
-        "seat_numbers": seat_numbers,
+        **seat_display,
         "status": booking.status,  # untouched — still whatever it was
         "amount": str(booking.amount),
         "event_start_time": booking.event.start_time.isoformat(),

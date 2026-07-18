@@ -1,3 +1,13 @@
+"""
+`docker exec eventops_web python manage.py run_evals --username <name>`
+— the actual entry point for ai_assistant/evals/. Django auto-discovers
+management commands from any INSTALLED_APPS app's
+management/commands/*.py, which is why this lives nested three folders
+deep (ai_assistant/management/commands/run_evals.py) rather than
+anywhere more obvious — that exact path structure is what Django's
+discovery mechanism requires, not a stylistic choice.
+"""
+
 from django.core.management.base import BaseCommand
 
 from users.models import User

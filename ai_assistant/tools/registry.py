@@ -1,3 +1,14 @@
+"""
+Dict-based dispatch table: one entry per tool the model can call, mapping
+its name (as OpenAI sees it in tool_calls) to the actual Python function
+plus what AIAssistantService._run_tool needs to inject before calling it —
+requires_auth (adds `user`, and 401s if not logged in), requires_request
+(adds `request`), requires_chat_state (adds `conversation_id`/`chat_state`).
+A tool's OpenAI-facing schema (ai_assistant/tools/schemas.py) is looked up
+from the same entry, so schema and implementation can't drift apart into
+two different sources of truth for one tool's shape.
+"""
+
 from ai_assistant.tools.event_tools import (
     get_all_events,
     get_available_seats,

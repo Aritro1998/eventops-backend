@@ -1,17 +1,71 @@
-from django.contrib import admin
+"""
+Django admin is the primary way organizers manage Events/Seats in this
+project (the API's EventViewSet still exists and works, but admin is where
+the space-aware seat generation actually gets exercised day to day).
+"""
+
 from .models import Event, Seat
+from django.contrib import admin
+from django.db import transaction
+from .services import EventService
 
 
 @admin.register(Event)
 class EventAdmin(admin.ModelAdmin):
-    list_display = ["id", "name", "start_time", "end_time", "total_seats", "price"]
+    """
+    Note: total_seats is still a required field on the admin form even
+    when a space is selected — Django doesn't know ahead of time that
+    save_model below is about to overwrite it with the space's real
+    capacity. In practice this just means typing any positive placeholder
+    number (e.g. 1) when picking a space; it gets replaced automatically.
+    Making the field optional/hidden when a space is chosen would need
+    custom admin form JS — not done here, noted as a rough edge.
+    """
+    list_display = ["id", "name", "venue", "space", "start_time", "end_time", "total_seats", "price", "is_archived"]
+    list_filter = ["venue", "is_archived"]
     search_fields = ["name"]
     list_display_links = ["id", "name"]
+    actions = ["archive_events"]
 
+    def archive_events(self, request, queryset):
+        """
+        Bulk action: the intended way to retire an event with booking
+        history. Real deletion is still available via the default "Delete
+        selected" action, but Django will refuse it (showing its own
+        protected-objects page) the moment an event has ever had a single
+        booking — see EventViewSet.perform_destroy for the same rule
+        enforced on the API side with a clean error instead of Django's
+        default page.
+        """
+        updated = queryset.update(is_archived=True)
+        self.message_user(request, f"Archived {updated} event(s).")
+
+    archive_events.short_description = "Archive selected events"
+
+    def save_model(self, request, obj, form, change):
+        """
+        Save an event and synchronize its associated seats via EventService.
+        Event.clean() (run by the admin form before this is called) has
+        already validated the change is safe.
+        """
+        with transaction.atomic():
+            if change:
+                previous = Event.objects.select_for_update().get(pk=obj.pk)
+                old_total_seats = previous.total_seats
+                old_space_id = previous.space_id
+                obj.save()
+                EventService.sync_seats_on_update(obj, old_total_seats, old_space_id)
+            else:
+                obj.save()
+                EventService.sync_seats_on_create(obj)
+                
 
 @admin.register(Seat)
 class SeatAdmin(admin.ModelAdmin):
-    list_display = ["id", "event", "seat_number"]
+    """Seats are normally managed indirectly through EventAdmin.save_model,
+    not created/edited here directly — this registration exists mainly for
+    inspecting/spot-fixing individual seat rows."""
+    list_display = ["id", "event", "seat_number", "row", "column", "display_label"]
     list_filter = ["event"]
     search_fields = ["seat_number", "event__name"]
     list_display_links = ["id", "event"]
