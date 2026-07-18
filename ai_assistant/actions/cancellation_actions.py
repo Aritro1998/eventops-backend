@@ -1,11 +1,11 @@
-from ai_assistant.models import PendingBooking, PendingBookingCancellation
+from ai_assistant.models import PendingBookingCancellation
 from bookings.services import BookingService
 
 
 def get_pending_cancellation_actions(user):
     """Return UI actions only when the user has a booking staged for cancellation."""
     
-    pending = PendingBookingCancellation.objects.filter(user=user).first()
+    pending = PendingBookingCancellation.for_user(user)
     
     if not pending:
         return []
@@ -23,13 +23,7 @@ def get_pending_cancellation_actions(user):
 def get_pending_cancellation_draft(user):
     """Return the staged cancellation's details for rendering, or None."""
     
-    pending = (
-        PendingBookingCancellation.objects
-        .select_related("booking__event")
-        .prefetch_related("booking__booking_seats__seat")
-        .filter(user=user)
-        .first()
-    )
+    pending = PendingBookingCancellation.for_user(user)
     
     if not pending or pending.is_expired:
         return None
@@ -47,13 +41,7 @@ def get_pending_cancellation_draft(user):
 def confirm_cancellation(user):
     """Actually cancel the booking the user staged for cancellation."""
     
-    pending = (
-        PendingBookingCancellation.objects
-        .select_related("booking__event")
-        .prefetch_related("booking__booking_seats__seat")
-        .filter(user=user)
-        .first()
-    )
+    pending = PendingBookingCancellation.for_user(user)
     
     if not pending:
         raise ValueError("No pending cancellation found")
@@ -92,13 +80,7 @@ def confirm_cancellation(user):
 def dismiss_cancellation(user):
     """Back out of a staged cancellation — the booking is untouched."""
     
-    pending = (
-        PendingBookingCancellation.objects
-        .select_related("booking__event")
-        .prefetch_related("booking__booking_seats__seat")
-        .filter(user=user)
-        .first()
-    )
+    pending = PendingBookingCancellation.for_user(user)
     
     if not pending:
         raise ValueError("No pending cancellation found")

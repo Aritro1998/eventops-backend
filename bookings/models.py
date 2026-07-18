@@ -34,6 +34,16 @@ class Booking(models.Model):
     def __str__(self):
         return f"Booking {self.id} (Event {self.event_id}, User {self.user_id}) - {self.status}"
     
+    def release_seats(self):
+        """
+        Release this booking's claim on its seats — flips is_active to
+        False rather than deleting the rows, so booking history still shows
+        every seat this booking ever held. Call this whenever the booking
+        transitions to a state that no longer holds its seats (CANCELLED,
+        EXPIRED).
+        """
+        self.booking_seats.update(is_active=False)
+    
     class Meta:
         ordering = ['-created_at']
 

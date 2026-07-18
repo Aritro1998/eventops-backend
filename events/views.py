@@ -1,8 +1,7 @@
 import logging
 
 from django.db import transaction
-from django.db.models import Max, Q
-from django.utils import timezone
+from django.db.models import Max
 from django.core.cache import cache
 from rest_framework import serializers
 from rest_framework.response import Response
@@ -11,8 +10,9 @@ from rest_framework.viewsets import ModelViewSet
 from rest_framework.filters import OrderingFilter
 
 from .models import Event, Seat
-from bookings.models import BookingSeat
 from .services import EventService
+from bookings.models import BookingSeat
+from bookings.services import BookingService
 from core.permissions import IsAdminOrOrganizer
 from .serializers import EventReadSerializer, EventWriteSerializer
 
@@ -43,21 +43,6 @@ class EventViewSet(ModelViewSet):
     # Adding ordering filter to allow clients to order events by start_time
     filter_backends = [OrderingFilter]
     ordering = ['start_time']
-
-    def invalidate_event_cache(self, event_id):
-        """
-        Invalidate cache for a specific event and the event list when an event is updated or deleted.
-        """
-        cache.delete(f"event:{event_id}")
-        if hasattr(cache, "delete_pattern"):
-            cache.delete_pattern("events:list:*")
-        logger.info(
-            "event_cache_invalidated",
-            extra={
-                "event": "event_cache_invalidated",
-                "event_id": event_id,
-            }
-        )
 
     def get_queryset(self):
         """
@@ -141,7 +126,7 @@ class EventViewSet(ModelViewSet):
             )
 
             # Invalidate cache for the event list after creating a new event
-            transaction.on_commit(lambda: self.invalidate_event_cache(event.id))
+            transaction.on_commit(lambda: BookingService.invalidate_event_cache(event.id))
 
     def perform_update(self, serializer):
         # We lock the event row so seat-count changes and seat table updates happen together.
@@ -192,7 +177,7 @@ class EventViewSet(ModelViewSet):
                         "new_total_seats": updated_event.total_seats,
                     }
                 )
-                transaction.on_commit(lambda: self.invalidate_event_cache(updated_event.id))
+                transaction.on_commit(lambda: BookingService.invalidate_event_cache(updated_event.id))
                 return
 
             # Save after validation
@@ -215,11 +200,7 @@ class EventViewSet(ModelViewSet):
                     seat__in=seats_above_limit,
                     booking__event=event,
                 ).filter(
-                    Q(booking__status='CONFIRMED') | 
-                    Q(
-                        booking__status__in=['PENDING', 'FAILED'],
-                        booking__expires_at__gt=timezone.now()
-                    )  
+                    BookingService.active_booking_q()
                 ).exists()
                 
                 if active_bookings_exist:
@@ -260,7 +241,7 @@ class EventViewSet(ModelViewSet):
             )
 
             # Invalidate cache for the updated event and the event list after updating an event
-            transaction.on_commit(lambda: self.invalidate_event_cache(updated_event.id))
+            transaction.on_commit(lambda: BookingService.invalidate_event_cache(updated_event.id))
 
     def perform_destroy(self, instance):
         with transaction.atomic():
@@ -275,7 +256,7 @@ class EventViewSet(ModelViewSet):
                 }
             )
             # Invalidate cache for the deleted event and the event list after deleting an event
-            transaction.on_commit(lambda: self.invalidate_event_cache(event_id))
+            transaction.on_commit(lambda: BookingService.invalidate_event_cache(event_id))
             
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:

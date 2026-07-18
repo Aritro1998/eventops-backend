@@ -57,6 +57,43 @@ class BookingService:
         ).first()
 
     @staticmethod
+    def get_booking_for_user(booking_id, user):
+        """
+        Fetch a single booking a user owns, fully loaded for detail/action use.
+
+        Returns None if it doesn't exist or belongs to someone else — callers
+        decide how to surface that (404 for HTTP views, ValueError for AI
+        tools), since each call site has a different error-reporting
+        convention.
+        """
+        return (
+            Booking.objects
+            .select_related("event", "payment")
+            .prefetch_related("booking_seats__seat")
+            .filter(id=booking_id, user=user)
+            .first()
+        )
+    
+    @staticmethod
+    def active_booking_q(prefix = 'booking__'):
+        """
+        Q object matching an actively-held booking: CONFIRMED always counts
+        as taken, PENDING/FAILED counts only while the hold hasn't expired
+        yet. `prefix` lets this be reused from different starting points in
+        the relation graph — default 'booking__' covers queries rooted at
+        BookingSeat (the common case); pass a longer path like
+        'seats__booking_seats__booking__' when starting from Event instead.
+        """
+        now = timezone.now()
+        return (
+            Q(**{f'{prefix}status': 'CONFIRMED'}) |
+            Q(**{
+                f'{prefix}status__in': ['PENDING', 'FAILED'],
+                f'{prefix}expires_at__gt': now,
+            })
+        )
+    
+    @staticmethod
     def is_seat_available(seat):
         """
         Check if seat is available.
@@ -66,16 +103,10 @@ class BookingService:
         - with PENDING / FAILED status AND not expired
         """
 
-        now = timezone.now()
-
         return not BookingSeat.objects.filter(
             seat=seat
         ).filter(
-            Q(booking__status="CONFIRMED") |
-            Q(
-                booking__status__in=["PENDING", "FAILED"],
-                booking__expires_at__gt=now
-            )
+           BookingService.active_booking_q()
         ).exists()
         
     @staticmethod
@@ -89,20 +120,11 @@ class BookingService:
         - booking is PENDING / FAILED and not expired
         """
 
-        now = timezone.now()
-
         return set(
             BookingSeat.objects.filter(
                 seat_id__in=seat_ids
             ).filter(
-                Q(
-                    booking__status="CONFIRMED"
-                )
-                |
-                Q(
-                    booking__status__in=["PENDING", "FAILED"],
-                    booking__expires_at__gt=now
-                )
+                BookingService.active_booking_q()
             ).values_list(
                 "seat_id",
                 flat=True
@@ -336,7 +358,7 @@ class BookingService:
             # so a cancelled booking releases its seats by flipping this flag
             # rather than deleting the rows — booking history still shows
             # every seat this booking ever held.
-            booking.booking_seats.update(is_active=False)
+            booking.release_seats()
             transaction.on_commit(
                 lambda: BookingService.invalidate_event_cache(event_id)
             )

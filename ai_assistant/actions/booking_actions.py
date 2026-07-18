@@ -8,7 +8,7 @@ from ai_assistant.actions.payment_actions import stage_payment_retry
 def get_pending_booking_actions(user):
     """Return UI actions only when the authenticated user has a live draft."""
 
-    pending = PendingBooking.objects.filter(user=user).first()
+    pending = PendingBooking.for_user(user)
 
     if not pending:
         return []
@@ -26,7 +26,7 @@ def get_pending_booking_actions(user):
 def get_pending_booking_draft(user):
     """Return the current draft's details for rendering, or None."""
 
-    pending = PendingBooking.objects.filter(user=user).select_related("event").first()
+    pending = PendingBooking.for_user(user)
 
     if not pending or pending.is_expired:
         return None
@@ -42,7 +42,7 @@ def get_pending_booking_draft(user):
 def confirm_pending_booking(user):
     """Turn the user's draft into a real booking using the existing service."""
 
-    pending = PendingBooking.objects.filter(user=user).first()
+    pending = PendingBooking.for_user(user)
 
     if not pending:
         raise ValueError("No pending booking found")
@@ -95,7 +95,7 @@ def confirm_pending_booking(user):
 def cancel_pending_booking_draft(user):
     """Discard only the authenticated user's unconfirmed booking draft."""
 
-    pending = PendingBooking.objects.filter(user=user).first()
+    pending = PendingBooking.for_user(user)
 
     if not pending:
         raise ValueError("No pending booking found")

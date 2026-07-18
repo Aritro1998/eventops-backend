@@ -14,37 +14,58 @@ def get_pending_action_expiry():
 
 
 # Create your models here.
-class PendingBooking(models.Model):
+class PendingActionBase(models.Model):
+    """
+    Shared shape for every "AI staged this, a human must confirm it" row —
+    PendingBooking, PendingBookingCancellation, PendingPaymentRetry all need
+    identical expiry tracking, just against different underlying data.
+    """
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='%(class)s_user')
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True, default=get_pending_action_expiry)
+    
     @property
     def is_expired(self):
         return timezone.now() >= self.expires_at
+
+    class Meta:
+        abstract = True
+
+
+class PendingBooking(PendingActionBase):
+    @classmethod
+    def for_user(cls, user):
+        return cls.objects.select_related("event").filter(user=user).first()
     
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="pending_booking_user")
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="pending_booking_event")
     seat_numbers = models.JSONField(default=list)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
-    created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField(db_index=True, default=get_pending_action_expiry)
     
 
-class PendingBookingCancellation(models.Model):
-    @property
-    def is_expired(self):
-        return timezone.now() >= self.expires_at
+class PendingBookingCancellation(PendingActionBase):
+    @classmethod
+    def for_user(cls, user):
+        return (
+            cls.objects
+            .select_related("booking__event")
+            .prefetch_related("booking__booking_seats__seat")
+            .filter(user=user)
+            .first()
+        )
     
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='pending_cancellation_user')
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='pending_cancellations')
-    created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField(db_index=True, default=get_pending_action_expiry)
     
     
-class PendingPaymentRetry(models.Model):
-    @property
-    def is_expired(self):
-        return timezone.now() >= self.expires_at
+class PendingPaymentRetry(PendingActionBase):
+    @classmethod
+    def for_user(cls, user):
+        return (
+            cls.objects
+            .select_related("booking__event")
+            .prefetch_related("booking__booking_seats__seat")
+            .filter(user=user)
+            .first()
+        )
     
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="pending_payment_retry_user")
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="pending_payment_retries")
-    created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField(db_index=True, default=get_pending_action_expiry)
     

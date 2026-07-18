@@ -1,17 +1,16 @@
 import logging
 
 from rest_framework import status
+from django.http import Http404
+from django.db import OperationalError
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.shortcuts import get_object_or_404
-from django.db import OperationalError
 
-from .models import Booking
 from .services import BookingService
-from core.throttles import BookingThrottle, DefaultThrottle
 from core.pagination import CustomPagination
 from payments.services import PaymentService
+from core.throttles import BookingThrottle, DefaultThrottle
 from .serializers import BookingWriteSerializer, BookingReadSerializer
 
 logger = logging.getLogger(__name__)
@@ -135,13 +134,9 @@ class BookingDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, booking_id):
-        booking = get_object_or_404(
-            Booking.objects\
-            .select_related("event", "payment")\
-            .prefetch_related("booking_seats__seat"),
-            id=booking_id,
-            user=request.user
-        )
+        booking = BookingService.get_booking_for_user(booking_id, request.user)
+        if booking is None:
+            raise Http404
 
         serializer = BookingReadSerializer(booking)
         return Response(serializer.data)
@@ -160,13 +155,9 @@ class BookingCancelView(APIView):
 
     def post(self, request, booking_id):
 
-        booking = get_object_or_404(
-            Booking.objects\
-            .select_related("event", "payment")\
-            .prefetch_related("booking_seats__seat"),
-            id=booking_id,
-            user=request.user
-        )
+        booking = BookingService.get_booking_for_user(booking_id, request.user)
+        if booking is None:
+            raise Http404
 
         try:
             booking = BookingService.cancel_booking(booking)
@@ -204,13 +195,9 @@ class BookingRetryPaymentView(APIView):
 
     def post(self, request, booking_id):
 
-        booking = get_object_or_404(
-            Booking.objects\
-            .select_related("event", "payment")\
-            .prefetch_related("booking_seats__seat"),
-            id=booking_id,
-            user=request.user
-        )
+        booking = BookingService.get_booking_for_user(booking_id, request.user)
+        if booking is None:
+            raise Http404
 
         # Validate booking status
         if booking.status not in ["FAILED", "PENDING"]:
@@ -229,7 +216,7 @@ class BookingRetryPaymentView(APIView):
             )
 
         try:
-            payment = PaymentService.process_payment(booking.id)
+            PaymentService.process_payment(booking.id)
         except ValueError as e:
             return Response(
                 {"detail": str(e)},

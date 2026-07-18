@@ -21,7 +21,7 @@ def stage_payment_retry(booking):
 def get_pending_payment_retry_actions(user):
     """Return UI actions only when the user has a booking staged for retry."""
     
-    pending = PendingPaymentRetry.objects.filter(user=user).first()
+    pending = PendingPaymentRetry.for_user(user)
     
     if not pending:
         return []
@@ -43,13 +43,7 @@ def get_pending_payment_retry_actions(user):
 def get_pending_payment_retry_draft(user):
     """Return the staged retry's details for rendering, or None."""
     
-    pending = (
-        PendingPaymentRetry.objects
-        .select_related("booking__event")
-        .prefetch_related("booking__booking_seats__seat")
-        .filter(user=user)
-        .first()
-    )
+    pending = PendingPaymentRetry.for_user(user)
     
     if not pending or pending.is_expired:
         return None
@@ -74,13 +68,7 @@ def get_pending_payment_retry_draft(user):
 def confirm_payment_retry(user):
     """Actually attempt the payment again for the staged booking."""
     
-    pending = (
-        PendingPaymentRetry.objects
-        .select_related("booking__event")
-        .prefetch_related("booking__booking_seats__seat")
-        .filter(user=user)
-        .first()
-    )
+    pending = PendingPaymentRetry.for_user(user)
     
     if not pending:
         raise ValueError("No pending payment retry found")
@@ -130,13 +118,7 @@ def confirm_payment_retry(user):
 def dismiss_payment_retry(user):
     """Back out of a staged retry — the booking is left exactly as it was."""
     
-    pending = (
-        PendingPaymentRetry.objects
-        .select_related("booking__event")
-        .prefetch_related("booking__booking_seats__seat")
-        .filter(user=user)
-        .first()
-    )
+    pending = PendingPaymentRetry.for_user(user)
     
     if not pending:
         raise ValueError("No pending payment retry found.")

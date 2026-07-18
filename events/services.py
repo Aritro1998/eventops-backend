@@ -8,7 +8,8 @@ from django.db.models.functions import Coalesce
 from rest_framework.exceptions import ValidationError
 
 from events.models import Event, Seat
-from bookings.models import Booking, BookingSeat
+from bookings.services import BookingService
+from bookings.models import BookingSeat
 
 
 class EventService:
@@ -74,8 +75,6 @@ class EventService:
         else:
             queryset = queryset.order_by('start_time')  # Default ordering by start_time
 
-        now = timezone.now()
-
         # Same "taken" rule used everywhere else (BookingService's seat
         # availability checks): CONFIRMED always blocks; PENDING/FAILED
         # blocks only while its hold hasn't expired yet.
@@ -83,13 +82,7 @@ class EventService:
             taken_seats=Coalesce(
                 Count(
                     'seats__booking_seats',
-                    filter=(
-                        Q(seats__booking_seats__booking__status='CONFIRMED') |
-                        Q(
-                            seats__booking_seats__booking__status__in=['PENDING', 'FAILED'],
-                            seats__booking_seats__booking__expires_at__gt=now,
-                        )
-                    )
+                    filter=BookingService.active_booking_q(prefix='seats__booking_seats__booking__')
                 ), 0
             ),
             available_seats=F('total_seats') - F('taken_seats')
@@ -103,8 +96,6 @@ class EventService:
         
     @staticmethod
     def get_available_seats(event_id):
-        now = timezone.now()
-
         # Mirrors BookingService.get_unavailable_seat_ids so a seat shown here
         # as available is never rejected as taken when actually booked, and
         # vice versa: CONFIRMED is always taken, PENDING/FAILED only while
@@ -112,8 +103,7 @@ class EventService:
         unavailable_seat_ids = BookingSeat.objects.filter(
             booking__event_id=event_id
         ).filter(
-            Q(booking__status='CONFIRMED') |
-            Q(booking__status__in=['PENDING', 'FAILED'], booking__expires_at__gt=now)
+            BookingService.active_booking_q()
         ).values_list(
             "seat_id",
             flat=True

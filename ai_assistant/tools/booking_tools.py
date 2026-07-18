@@ -1,10 +1,8 @@
 import logging
 
-from bookings.models import Booking
 from events.models import Event, Seat
 from events.services import EventService
 from bookings.services import BookingService
-from payments.services import PaymentService
 from bookings.serializers import BookingReadSerializer
 from ai_assistant.actions.payment_actions import stage_payment_retry
 from ai_assistant.models import PendingBooking, get_pending_action_expiry, PendingBookingCancellation
@@ -100,13 +98,7 @@ def prepare_payment_retry(user, request, booking_id):
     )
 
     # Fetch the booking with the given booking_id and ensure it belongs to the user
-    booking = (
-        Booking.objects
-        .select_related("event", "payment")
-        .prefetch_related("booking_seats__seat")
-        .filter(id=booking_id, user=user)
-        .first()
-    )
+    booking = BookingService.get_booking_for_user(booking_id, user)
 
     if not booking:
         raise ValueError("Booking not found.")
@@ -133,13 +125,8 @@ def prepare_cancel_booking(user, booking_id):
         "ai_tool_prepare_cancel_booking",
         extra={"event": "ai_tool_prepare_cancel_booking", "user_id": user.id, "booking_id": booking_id}
     )
-    booking = (
-        Booking.objects
-        .select_related("event")
-        .prefetch_related("booking_seats__seat")
-        .filter(id=booking_id, user=user)
-        .first()
-    )
+    
+    booking = BookingService.get_booking_for_user(booking_id, user)
 
     if not booking:
         raise ValueError("Booking not found.")
