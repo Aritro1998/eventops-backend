@@ -103,6 +103,11 @@ def get_system_prompt(user=None, request=None, chat_state=None):
         1. Use search_events if needed.
         2. Use get_available_seats. Don't print the seats as a list.
         You must use a grid format (10 columns and N rows) to display the available seats.
+        Always call get_available_seats again before telling the user which
+        seats are available or accepting seat numbers for a new booking,
+        even if you already showed a seat list earlier in this conversation.
+        Availability can change between messages — never reuse a previous
+        seats list from memory.
         3. Ask the user which seats they want. Pass seat numbers to prepare_booking.
         4. Call prepare_booking.
         5. Show the booking summary.
@@ -161,6 +166,19 @@ def get_system_prompt(user=None, request=None, chat_state=None):
         After any tool call succeeds, speak in the past tense.
         Say what was done using the tool result.
         Never claim an action was completed unless the tool result confirms it.
+        Never say a booking, cancellation, or payment retry has been prepared
+        or staged unless you have actually called prepare_booking,
+        prepare_cancel_booking, or prepare_payment_retry in this exact
+        response and its tool result confirms it.
+
+        Never announce that you are about to check something or call a tool
+        as your entire response (e.g. "I will now check...", "Checking...",
+        "Booking now..."). If you have enough information to act, call the
+        tool immediately in this same response instead of describing what
+        you are going to do next turn. Only respond with text alone when you
+        are actually waiting on the user for missing information (e.g. which
+        seats they want), never as a placeholder before an action you could
+        already take.
 
         Current date: {now.date().isoformat()}
         Current time: {now.strftime("%H:%M:%S")}
@@ -179,18 +197,15 @@ class AIAssistantService:
     def _run_tool(self, tool_name, args, user, request, conversation_id, chat_state):
         """Execute one tool call. Shared by chat() and chat_stream() so the
         auth/kwargs/error-handling rules live in exactly one place.
-
-        Returns (tool_result_dict, flag_name_or_None) — the flag tells the
-        caller which "something was staged" flag to flip, if any.
         """
         tool_config = TOOL_REGISTRY.get(tool_name)
 
         if not tool_config:
-            return {"error": "Tool not found"}, None
+            return {"error": "Tool not found"}
 
         require_auth = tool_config.get("requires_auth", False)
         if require_auth and not user.is_authenticated:
-            return {"error": "Authentication required"}, None
+            return {"error": "Authentication required"}
 
         kwargs = dict(args)
         if require_auth:
@@ -202,17 +217,9 @@ class AIAssistantService:
             kwargs["chat_state"] = chat_state
 
         tool_function = tool_config["function"]
-        flag_set = None
 
         try:
             tool_result = tool_function(**kwargs)
-            if "error" not in tool_result:
-                if tool_name == "prepare_booking":
-                    flag_set = "booking_drafted"
-                elif tool_name == "prepare_cancel_booking":
-                    flag_set = "cancellation_requested"
-                elif tool_name == "prepare_payment_retry":
-                    flag_set = "payment_retry_requested"
         except ValueError as e:
             tool_result = {"error": str(e)}
         except Exception as e:
@@ -222,7 +229,7 @@ class AIAssistantService:
             )
             tool_result = {"error": str(e)}
 
-        return tool_result, flag_set
+        return tool_result
 
     def chat(self, user_prompt, user=None, request=None, conversation_id=None, chat_state=None):
         # 1. Create the system prompt
@@ -250,7 +257,7 @@ class AIAssistantService:
             response = self.client.chat.completions.create(
                 model='gpt-4o-mini',
                 messages=messages,
-                temperature=0.3,
+                temperature=0,
                 tools=tools,
                 parallel_tool_calls=False
             )
@@ -260,9 +267,6 @@ class AIAssistantService:
 
 
         # 4. Make the tool calls
-        booking_drafted = False
-        cancellation_requested = False
-        payment_retry_requested = False
         for _ in range(MAX_TOOL_CALLS):
             message = response.choices[0].message
             # If there are no tool calls, add the turn and return the response
@@ -273,28 +277,22 @@ class AIAssistantService:
                 ChatState.add_turn(chat_state, "assistant", message.content)
                 ChatState.save(conversation_id, chat_state)
 
-                # Only surface a draft card on the turn that actually created
-                # or updated it, not on every later unrelated message.
-                draft = get_pending_booking_draft(user) if booking_drafted else None
-                cancellation = get_pending_cancellation_draft(user) if cancellation_requested else None
-                payment_retry = get_pending_payment_retry_draft(user) if payment_retry_requested else None
+                # Always reflects whatever is actually in the database right
+                # now — same rule "actions" already follows — not gated on
+                # whether this exact turn's tool call happened to run.
+                draft = get_pending_booking_draft(user)
+                cancellation = get_pending_cancellation_draft(user)
+                payment_retry = get_pending_payment_retry_draft(user)
                 return message.content, draft, cancellation, payment_retry
 
             messages.append(message)
             for tool_call in message.tool_calls:
                 tool_name = tool_call.function.name
                 args = json.loads(tool_call.function.arguments)
-                
-                tool_result, flag_set = self._run_tool(
+
+                tool_result = self._run_tool(
                     tool_name, args, user, request, conversation_id, chat_state
                 )
-                
-                if flag_set == "booking_drafted":
-                    booking_drafted = True
-                elif flag_set == "cancellation_requested":
-                    cancellation_requested = True
-                elif flag_set == "payment_retry_requested":
-                    payment_retry_requested = True
 
                 # Add the tool result to the conversation history
                 messages.append(
@@ -310,7 +308,7 @@ class AIAssistantService:
                 response = self.client.chat.completions.create(
                     model='gpt-4o-mini',
                     messages=messages,
-                    temperature=0.3,
+                    temperature=0,
                     tools=tools,
                     parallel_tool_calls=False
                 )
@@ -341,10 +339,7 @@ class AIAssistantService:
         ]
         
         tools = [tool_config["schema"] for tool_config in TOOL_REGISTRY.values()]
-        
-        booking_drafted = False
-        cancellation_requested = False
-        payment_retry_requested = False
+
         full_text = ""
         
         for _ in range(MAX_TOOL_CALLS):
@@ -352,7 +347,7 @@ class AIAssistantService:
                 stream = self.client.chat.completions.create(
                     model='gpt-4o-mini',
                     messages=messages,
-                    temperature=0.3,
+                    temperature=0,
                     tools=tools,
                     parallel_tool_calls=False,
                     stream=True
@@ -396,13 +391,16 @@ class AIAssistantService:
                 ChatState.add_turn(chat_state, "user", user_prompt)
                 ChatState.add_turn(chat_state, "assistant", full_text)
                 ChatState.save(conversation_id, chat_state)
-                
+
+                # Always reflects whatever is actually in the database right
+                # now — same rule "actions" already follows — not gated on
+                # whether this exact turn's tool call happened to run.
                 yield {
                     "type": "done",
-                    "draft": get_pending_booking_draft(user) if booking_drafted else None,
-                    "cancellation": get_pending_cancellation_draft(user) if cancellation_requested else None,
-                    "payment_retry": get_pending_payment_retry_draft(user) if payment_retry_requested else None
-                } 
+                    "draft": get_pending_booking_draft(user),
+                    "cancellation": get_pending_cancellation_draft(user),
+                    "payment_retry": get_pending_payment_retry_draft(user),
+                }
                 return
             
             # Otherwise, one or more tools were requested. Rebuild the
@@ -427,7 +425,7 @@ class AIAssistantService:
             
             for entry in tool_calls_by_index.values():
                 args = json.loads(entry["arguments"])
-                tool_result, flag_set = self._run_tool(
+                tool_result = self._run_tool(
                     entry["name"],
                     args,
                     user,
@@ -435,14 +433,7 @@ class AIAssistantService:
                     conversation_id,
                     chat_state
                 )
-                
-                if flag_set == "booking_drafted":
-                    booking_drafted = True
-                elif flag_set == "cancellation_requested":
-                    cancellation_requested = True
-                elif flag_set == "payment_retry_requested":
-                    payment_retry_requested = True
-                    
+
                 messages.append(
                     {
                         "role": "tool",

@@ -20,8 +20,9 @@ class BookingAdmin(admin.ModelAdmin):
 @admin.register(BookingSeat)
 class BookingSeatAdmin(admin.ModelAdmin):
     list_display = [
-        "id", "booking", "seat",
+        "id", "booking", "seat", "is_active",
     ]
+    list_filter = ["is_active"]
     search_fields = [
         "booking__user__username",
     ]
