@@ -321,7 +321,7 @@ class AIAssistantService:
             "Please try again later."
         ), None, None, None
         
-    def chat_stream(self, user_prompt, user=None, request=None, conversation_id=None, chat_state=None):
+    def chat_stream(self, user_prompt, user=None, request=None, conversation_id=None, chat_state=None, tool_call_log=None):
         """
         Conversation loop that yields pieces as they arrive instead of returning one finished answer.
         """
@@ -433,6 +433,9 @@ class AIAssistantService:
                     conversation_id,
                     chat_state
                 )
+                
+                if tool_call_log is not None:
+                    tool_call_log.append({"tool": entry["name"], "args": args})
 
                 messages.append(
                     {

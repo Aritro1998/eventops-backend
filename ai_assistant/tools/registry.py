@@ -31,6 +31,7 @@ TOOL_REGISTRY = {
     },
     "get_event_detail": {
         "requires_auth": False,
+        "requires_chat_state": True,
         "function": get_event_detail,
         "schema": GET_EVENT_DETAIL_TOOL,
     },
@@ -48,6 +49,7 @@ TOOL_REGISTRY = {
     },
     "search_events": {
         "requires_auth": False,
+        "requires_chat_state": True,
         "function": search_events,
         "schema": SEARCH_EVENTS_TOOL,
     },
@@ -58,12 +60,12 @@ TOOL_REGISTRY = {
         "function": prepare_booking,
         "schema": PREPARE_BOOKING_TOOL,
     },
-        "prepare_payment_retry": {
+    "prepare_payment_retry": {
         "requires_auth": True,
         "function": prepare_payment_retry,
         "schema": PREPARE_PAYMENT_RETRY_TOOL,
     },
-        "prepare_cancel_booking": {
+    "prepare_cancel_booking": {
         "requires_auth": True,
         "function": prepare_cancel_booking,
         "schema": PREPARE_CANCEL_BOOKING_TOOL,

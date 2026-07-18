@@ -28,11 +28,15 @@ def get_all_events(date_filter=None, start_date=None, end_date=None, ordering=No
     return serializer.data
 
 
-def get_event_detail(event_id):
+def get_event_detail(event_id, conversation_id, chat_state):
     logger.info(
         "ai_tool_get_event_detail",
         extra={"event": "ai_tool_get_event_detail", "event_id": event_id}
     )
+
+    if event_id not in chat_state.get("searched_event_ids", []):
+        raise ValueError("Use search_events to look up this event before getting its details.")
+
     event = EventService.get_event_detail(event_id)
     serializer = EventReadSerializer(event)
     return serializer.data
@@ -43,6 +47,10 @@ def get_available_seats(request, event_id, conversation_id, chat_state):
         "ai_tool_get_available_seats",
         extra={"event": "ai_tool_get_available_seats", "event_id": event_id}
     )
+    
+    if event_id not in chat_state.get("searched_event_ids", []):
+        raise ValueError("Use search_events to look up this event before checking its seats.")
+    
     event = EventService.get_event_detail(event_id)
 
     # Seat selection may happen in a later request, so retain the event in
@@ -60,11 +68,21 @@ def get_available_seats(request, event_id, conversation_id, chat_state):
     }
 
 
-def search_events(event_name):
+def search_events(event_name, conversation_id, chat_state):
     logger.info(
         "ai_tool_search_events",
         extra={"event": "ai_tool_search_events", "event_name": event_name}
     )
     events = EventService.search_events_by_name(event_name)
+    
+    # Track every id this tool has legitimately resolved this conversation,
+    # so get_available_seats can tell "the model looked this up" apart from
+    # "the model guessed a number" — both currently arrive as the same
+    # plain integer argument otherwise.
+    searched_ids = set(chat_state.get("searched_event_ids", []))
+    searched_ids.update(event.id for event in events)
+    chat_state["searched_event_ids"] = list(searched_ids)
+    ChatState.save(conversation_id, chat_state)
+    
     serializer = EventSummarySerializer(events, many=True)
     return serializer.data
