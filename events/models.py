@@ -49,9 +49,11 @@ class Event(models.Model):
         This method enforces business rules that cannot be expressed using field-level validation alone, including:
         - A space cannot be assigned unless a venue is also selected.
         - The selected space must belong to the selected venue.
-        - An event's space cannot be changed once it has active bookings.
-        - The total seat count cannot be reduced below the highest confirmed 
-        seat number or while higher-numbered seats have active bookings.
+        - An event's space cannot be changed once it has any booking history
+        (active or past) — BookingSeat.seat is on_delete=PROTECT regardless
+        of status, so this must never be narrower than "any booking at all."
+        - The total seat count cannot be reduced below the highest confirmed
+        seat number, or while higher-numbered seats have any booking history.
 
         Raises:
             ValidationError: If any of the above validation rules are violated.
@@ -69,36 +71,40 @@ class Event(models.Model):
         # The remaining validations apply only when updating an existing event
         if self.pk:
             from bookings.models import BookingSeat
-            from bookings.services import BookingService
             from django.db.models import Max
+            from events.services import EventService
 
             # Retrieve the current persisted version for comparison
             previous = Event.objects.get(pk=self.pk)
 
-            # Prevent changing the venue space after bookings exist
+            # Prevent changing the venue space after ANY booking history —
+            # not just active bookings. BookingSeat.seat is on_delete=PROTECT
+            # regardless of booking status, so even a long-cancelled booking
+            # would make the seat-replacement in
+            # EventService.sync_seats_on_update crash with an unhandled
+            # ProtectedError if this only checked active bookings.
             if self.space_id != previous.space_id:
-                has_bookings = BookingSeat.objects.filter(
-                    seat__event=self
-                ).filter(BookingService.active_booking_q()).exists()
-                if has_bookings:
-                    raise ValidationError("Cannot change the space for an event that already has active bookings.")
-                
+                if EventService.has_booking_history(self):
+                    raise ValidationError("Cannot change the space for an event that already has booking history.")
+
             # Validate seat reduction only when the total seat count decreases
             elif self.total_seats < previous.total_seats:
                 # Find the highest seat number that has been confirmed
                 max_booked_seat = BookingSeat.objects.filter(
                     booking__event=self, booking__status='CONFIRMED'
                 ).aggregate(max_seat_number=Max('seat__seat_number'))['max_seat_number'] or 0
-                
+
                 if self.total_seats < max_booked_seat:
                     raise ValidationError(f"Cannot reduce total seats below the highest booked seat number ({max_booked_seat}).")
-                
-                # Ensure no active bookings exist for seats that would be removed
-                active_bookings_exist = BookingSeat.objects.filter(
+
+                # Ensure no booking history — active or past — exists for
+                # seats that would be removed. Same PROTECT-crash reasoning
+                # as the space-change check above.
+                has_booking_history_above_limit = BookingSeat.objects.filter(
                     seat__event=self, seat__seat_number__gt=self.total_seats
-                ).filter(BookingService.active_booking_q()).exists()
-                if active_bookings_exist:
-                    raise ValidationError("Cannot reduce total seats because some higher-numbered seats have active bookings.")
+                ).exists()
+                if has_booking_history_above_limit:
+                    raise ValidationError("Cannot reduce total seats because some higher-numbered seats have booking history (active or past).")
 
     @property
     def is_general_admission(self):

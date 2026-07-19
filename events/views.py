@@ -2,6 +2,7 @@ import logging
 
 from django.db import transaction
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.viewsets import ModelViewSet
@@ -133,6 +134,13 @@ class EventViewSet(ModelViewSet):
         already ran in EventWriteSerializer.validate() via Event.clean().
         This only saves the event and delegates seat synchronization to
         EventService, the same logic the admin panel uses.
+
+        EventService.sync_seats_on_update can still raise a fresh
+        DjangoValidationError even after clean() already passed — that
+        check ran before this transaction's row lock was acquired, so a
+        concurrent booking could have slipped in during the gap. Converting
+        it here keeps the API response a clean 400 instead of an unhandled
+        500 in that rare race case.
         """
         # We lock the event row so seat-count changes and seat table updates happen together.
         with transaction.atomic():
@@ -142,7 +150,10 @@ class EventViewSet(ModelViewSet):
             serializer.instance = event
 
             updated_event = serializer.save()
-            EventService.sync_seats_on_update(updated_event, old_total_seats, old_space_id)
+            try:
+                EventService.sync_seats_on_update(updated_event, old_total_seats, old_space_id)
+            except DjangoValidationError as e:
+                raise ValidationError(e.messages if hasattr(e, 'messages') else str(e))
 
             logger.info(
                 "event_updated",

@@ -6,6 +6,7 @@ from django.utils.dateparse import parse_date
 from django.db.models import Count, Q, F
 from django.db.models.functions import Coalesce
 from rest_framework.exceptions import ValidationError
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 from venues.models import Space
 from events.models import Event, Seat
@@ -108,11 +109,19 @@ class EventService:
 
     @staticmethod
     def sync_seats_on_update(event, old_total_seats, old_space_id):
-        """Call after an existing Event is saved with possibly-changed total_seats/space.
+        """
+        Call after an existing Event is saved with possibly-changed total_seats/space.
 
-        Event.clean() has already validated this is safe (space can't change
-        with active bookings; total_seats can't shrink below booked seats) —
-        this only performs the seat mutation, it doesn't re-check safety.
+        Event.clean() already validates this is safe (space can't change with
+        any booking history; total_seats can't shrink past booked seats) —
+        but that check runs before this transaction's row lock is acquired,
+        so a concurrent booking could still slip in during the gap. The
+        space-change branch below re-checks under the lock as the
+        authoritative, race-safe guard, same reasoning as
+        resize_plain_seats. BookingSeat.seat is on_delete=PROTECT regardless
+        of booking status, so this can never be silently bypassed at the DB
+        level either — these checks exist purely so the caller gets a clean,
+        expected error instead of an unhandled ProtectedError.
         """
         total_seats, seat_specs = EventService.build_seat_specs(event.space, event.total_seats)
         event.total_seats = total_seats
@@ -120,7 +129,19 @@ class EventService:
 
         space_changed = event.space_id != old_space_id
         if space_changed:
-            event.seats.all().delete()
+            # Lock the event's existing seats before replacing them —
+            # create_booking() locks a Seat row, not the Event row, so
+            # without this a concurrent booking could commit in the gap
+            # between Event.clean()'s check and the delete below.
+            old_seat_ids = list(
+                Seat.objects.select_for_update().filter(event=event).values_list('id', flat=True)
+            )
+            has_any_booking = BookingSeat.objects.filter(seat_id__in=old_seat_ids).exists()
+            if has_any_booking:
+                raise DjangoValidationError(
+                    "Cannot change the space for an event that already has booking history."
+                )
+            Seat.objects.filter(id__in=old_seat_ids).delete()
             Seat.objects.bulk_create([Seat(event=event, **spec) for spec in seat_specs])
         elif not event.space_id and event.total_seats != old_total_seats:
             EventService.resize_plain_seats(event, old_total_seats)
@@ -153,9 +174,18 @@ class EventService:
         If the total seat count increases, new seats are created with sequential
         seat numbers starting after the previous maximum.
 
-        If the total seat count decreases, only seats beyond the new limit that
-        are not part of a confirmed booking are removed. Seats with confirmed
-        bookings are preserved to avoid invalidating existing reservations.
+        If the total seat count decreases, the reduction is blocked entirely
+        if any booking — active or historical (CANCELLED/EXPIRED/old FAILED)
+        — still references a seat being removed. Deleting a seat that still
+        has *any* booking pointed at it would hit BookingSeat.seat's
+        on_delete=PROTECT and crash with an unhandled ProtectedError;
+        excluding only CONFIRMED bookings (the previous behavior here) isn't
+        enough, since a historical booking still protects its seat. This
+        check also re-runs under a row lock on the seats themselves (not just
+        the Event row locked by the caller), since create_booking() locks a
+        Seat row — without this, a concurrent booking on one of these seats
+        could commit in the gap between Event.clean()'s check and this
+        method's delete.
         """
         if event.total_seats > old_total_seats:
             Seat.objects.bulk_create([
@@ -163,11 +193,17 @@ class EventService:
                 for i in range(old_total_seats + 1, event.total_seats + 1)
             ])
         else:
-            seats_above_limit = Seat.objects.filter(event=event, seat_number__gt=event.total_seats)
-            confirmed_seat_ids = BookingSeat.objects.filter(
-                booking__event=event, booking__status='CONFIRMED'
-            ).values_list('seat_id', flat=True)
-            seats_above_limit.exclude(id__in=confirmed_seat_ids).delete()
+            seat_ids_to_remove = list(
+                Seat.objects.select_for_update().filter(
+                    event=event, seat_number__gt=event.total_seats
+                ).values_list('id', flat=True)
+            )
+            has_any_booking = BookingSeat.objects.filter(seat_id__in=seat_ids_to_remove).exists()
+            if has_any_booking:
+                raise DjangoValidationError(
+                    "Cannot reduce total seats because some higher-numbered seats have booking history (active or past)."
+                )
+            Seat.objects.filter(id__in=seat_ids_to_remove).delete()
     
     @staticmethod
     def build_date_range_query(start_date, end_date):
