@@ -119,7 +119,10 @@ def get_system_prompt(user=None, request=None, chat_state=None):
         item, with columns for the fields relevant to that data (e.g. Event, Seat,
         Amount, Status, Booking ID for bookings). Never use a numbered list with
         bold field labels for multi-item results. A single item can still be
-        described in plain sentences.
+        described in plain sentences. Never include an is_general_admission /
+        "General Admission" column in an event table — it's there for you to
+        reason with (e.g. deciding whether to ask for seats or a quantity),
+        not for the user to see as a listed field.
 
         When describing any booking, draft, cancellation, or payment retry
         (from prepare_booking, get_my_bookings, or any confirm/dismiss
@@ -132,6 +135,13 @@ def get_system_prompt(user=None, request=None, chat_state=None):
         Do not ask the user for internal ids if they can be found using tools.
         Always use available tools to retrieve the correct identifier before performing actions or 
         answering questions that depend on those identifiers.
+        
+        When the user asks about policies, rules, refunds, prohibited items,
+        accessibility, parking, or anything venue/event-specific that you don't
+        already know from a prior tool result, call search_knowledge_base with
+        their question. If the results returned don't actually address the
+        question, tell the user you don't have that information — never answer
+        a policy question from general knowledge or guesswork.
 
         If multiple events with similar names are found, ask the user to clarify which event they mean before proceeding.
 
@@ -351,9 +361,15 @@ class AIAssistantService:
                 # Always reflects whatever is actually in the database right
                 # now — same rule "actions" already follows — not gated on
                 # whether this exact turn's tool call happened to run.
-                draft = get_pending_booking_draft(user)
-                cancellation = get_pending_cancellation_draft(user)
-                payment_retry = get_pending_payment_retry_draft(user)
+                # Guarded by is_authenticated: PendingBooking.user is a
+                # required FK, and an anonymous request's user is
+                # AnonymousUser (not None), which crashes the lookup.
+                if user and user.is_authenticated:
+                    draft = get_pending_booking_draft(user)
+                    cancellation = get_pending_cancellation_draft(user)
+                    payment_retry = get_pending_payment_retry_draft(user)
+                else:
+                    draft = cancellation = payment_retry = None
                 return message.content, draft, cancellation, payment_retry
 
             messages.append(message)
@@ -466,11 +482,20 @@ class AIAssistantService:
                 # Always reflects whatever is actually in the database right
                 # now — same rule "actions" already follows — not gated on
                 # whether this exact turn's tool call happened to run.
+                # Guarded by is_authenticated: PendingBooking.user is a
+                # required FK, and an anonymous request's user is
+                # AnonymousUser (not None), which crashes the lookup.
+                if user and user.is_authenticated:
+                    draft = get_pending_booking_draft(user)
+                    cancellation = get_pending_cancellation_draft(user)
+                    payment_retry = get_pending_payment_retry_draft(user)
+                else:
+                    draft = cancellation = payment_retry = None
                 yield {
                     "type": "done",
-                    "draft": get_pending_booking_draft(user),
-                    "cancellation": get_pending_cancellation_draft(user),
-                    "payment_retry": get_pending_payment_retry_draft(user),
+                    "draft": draft,
+                    "cancellation": cancellation,
+                    "payment_retry": payment_retry,
                 }
                 return
             

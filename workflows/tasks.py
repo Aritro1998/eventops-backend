@@ -14,11 +14,13 @@ import logging
 from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
-from bookings.models import Booking
-from workflows.models import WorkflowJob
 from django.core.mail import EmailMultiAlternatives
 
 from django.conf import settings
+from bookings.models import Booking
+from workflows.models import WorkflowJob
+from knowledge.models import KnowledgeDocument
+from knowledge.services import KnowledgeService
 from workflows.services import requeue_pending_jobs
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,8 @@ def process_workflow_job(self, job_id):
             handle_booking_confirmation(job)
         elif job.job_type.strip().upper() == "BOOKING_EXPIRY":
             handle_booking_expiry(job)
+        elif job.job_type.strip().upper() == "KNOWLEDGE_CHUNKING":
+            handle_knowledge_chunking(job)
         else:
             raise ValueError(f"Unknown job type: {job.job_type}")
 
@@ -253,33 +257,53 @@ def handle_booking_confirmation(job):
     seat_summary = f"{seat_count} ticket(s)" if is_general_admission else ", ".join(seat_labels)
     seat_row_label = "Tickets" if is_general_admission else "Seat"
 
+    # Both absent (older queued jobs from before this payload shape existed)
+    # or an event with no venue/space at all — either way, nothing to show.
+    venue_name = job.payload.get("venue_name")
+    space_name = job.payload.get("space_name")
+
     if not email:
         raise ValueError("Email not found in payload")
 
     subject = f"Booking Confirmed - {event_name}"
 
-    text_content = f"""
-    Your booking is confirmed.
+    text_lines = [f"Event: {event_name}"]
+    if venue_name:
+        text_lines.append(f"Venue: {venue_name}")
+    if space_name:
+        text_lines.append(f"Space: {space_name}")
+    text_lines += [
+        f"{seat_row_label}: {seat_summary}",
+        f"Time: {event_time}",
+        f"Booking ID: {booking_id}",
+    ]
 
-    Event: {event_name}
-    {seat_row_label}: {seat_summary}
-    Time: {event_time}
-    Booking ID: {booking_id}
-    """
+    text_content = "Your booking is confirmed.\n\n" + "\n".join(text_lines)
+
+    venue_html_row = f"""
+                    <tr>
+                        <td style="padding: 8px; font-weight: bold;">Venue</td>
+                        <td style="padding: 8px;">{venue_name}</td>
+                    </tr>""" if venue_name else ""
+    space_html_row = f"""
+                    <tr>
+                        <td style="padding: 8px; font-weight: bold;">Space</td>
+                        <td style="padding: 8px;">{space_name}</td>
+                    </tr>""" if space_name else ""
 
     html_content = f"""
     <html>
         <body style="font-family: Arial, sans-serif; background-color: #f6f6f6; padding: 20px;">
             <div style="max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 8px;">
                 <h2 style="color: #333;">Booking Confirmed</h2>
-                
+
                 <p>Your booking has been successfully confirmed.</p>
 
                 <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
                     <tr>
                         <td style="padding: 8px; font-weight: bold;">Event</td>
                         <td style="padding: 8px;">{event_name}</td>
-                    </tr>
+                    </tr>{venue_html_row}{space_html_row}
                     <tr>
                         <td style="padding: 8px; font-weight: bold;">{seat_row_label}</td>
                         <td style="padding: 8px;">{seat_summary}</td>
@@ -369,3 +393,14 @@ def handle_booking_expiry(job):
                 "seat_ids": [bs.seat_id for bs in booking.booking_seats.all()],
             }
         )
+        
+        
+def handle_knowledge_chunking(job):
+    """
+    Re-chunk and re-embed a KnowledgeDocument. Idempotent — sync_chunks
+    replaces existing chunks each time, so a retried/duplicate job is safe.
+    """
+    document_id = job.payload.get("document_id")
+    document = KnowledgeDocument.objects.get(id=document_id)
+    KnowledgeService.sync_chunks(document)
+    

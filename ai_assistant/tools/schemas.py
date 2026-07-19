@@ -259,3 +259,30 @@ PREPARE_CANCEL_BOOKING_TOOL = {
     }
 }
 
+
+SEARCH_KNOWLEDGE_BASE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_knowledge_base",
+        "description": (
+            "Search venue and event knowledge documents (policies, rules, "
+            "FAQs, venue guides) for information relevant to the user's "
+            "question. Use this whenever asked about refund policy, "
+            "prohibited items, accessibility, parking, house rules, or any "
+            "other venue/event-specific or general policy question. If the "
+            "returned results don't actually answer the question, say you "
+            "don't have information on that rather than guessing — never "
+            "invent a policy that wasn't returned here."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The user's question, in their own words."
+                }
+            },
+            "required": ["query"]
+        }
+    }
+}

@@ -10,6 +10,7 @@ psycopg2-binary==2.9.11
 redis==5.0.1
 django-redis==5.4.0
 celery==5.3.6
+pgvector==0.5.0
 
 # Runtime, configuration, and logging
 gunicorn==22.0.0

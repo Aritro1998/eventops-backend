@@ -1,4 +1,5 @@
 from django.db import models
+from pgvector.django import VectorField
 
 from venues.models import Venue
 from events.models import Event
@@ -32,3 +33,27 @@ class KnowledgeDocument(models.Model):
 
     class Meta:
         ordering = ['-updated_at']
+        
+
+class KnowledgeChunk(models.Model):
+    """
+    One embeddable passage of a KnowledgeDocument. A document is chunked
+    because embeddings only make sense at the granularity of a focused
+    passage — embedding an entire multi-topic document (parking info,
+    refund policy, accessibility, all in one) would blur those distinct
+    topics into one vector, defeating the point of semantic search.
+    """
+    document = models.ForeignKey(KnowledgeDocument, on_delete=models.CASCADE, related_name='chunks')
+    content = models.TextField()
+    embedding = VectorField(dimensions=1536) # text-embedding-3-small's output size
+    chunk_index = models.PositiveIntegerField() # position within the parent document
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['document', 'chunk_index']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['document', 'chunk_index'], 
+                name='unique_chunk_index_per_document'
+            ),
+        ]

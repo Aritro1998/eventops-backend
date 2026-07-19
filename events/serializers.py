@@ -27,6 +27,8 @@ class EventReadSerializer(serializers.ModelSerializer):
     """
     available_seats = serializers.IntegerField(read_only=True)
     is_general_admission = serializers.BooleanField(read_only=True)
+    venue_name = serializers.CharField(source='venue.name', read_only=True, default=None)
+    space_name = serializers.CharField(source='space.name', read_only=True, default=None)
 
     class Meta:
         model = Event
@@ -39,7 +41,9 @@ class EventReadSerializer(serializers.ModelSerializer):
             'available_seats',
             'price',
             'venue',
+            'venue_name',
             'space',
+            'space_name',
             'is_general_admission',
         ]
 

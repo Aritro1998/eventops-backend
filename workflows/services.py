@@ -29,7 +29,7 @@ def requeue_pending_jobs():
     # Immediate jobs (email etc.)
     immediate_jobs = WorkflowJob.objects.filter(
         status="PENDING",
-        job_type__in=["BOOKING_CONFIRMATION"]
+        job_type__in=["BOOKING_CONFIRMATION", "KNOWLEDGE_CHUNKING"]
     )
 
     for job in list(expiry_jobs) + list(immediate_jobs):

@@ -14,6 +14,7 @@ only place Django reliably calls signal-registration code at startup.
 """
 
 from django.db import transaction
+from django.utils import timezone
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
 
@@ -79,7 +80,12 @@ def booking_status_change_handler(sender, instance, created, **kwargs):
                 # Presentation only — see Booking.seat_display for why this
                 # is a count for general admission, labels otherwise.
                 **instance.seat_display(),
-                "event_time": str(instance.event.start_time),
+                # %d %b %Y, %I:%M %p matches the human-readable format
+                # already used elsewhere (see gradio_app.py's format_datetime)
+                # rather than the raw isoformat/microseconds str() produced.
+                "event_time": timezone.localtime(instance.event.start_time).strftime("%d %b %Y, %I:%M %p"),
+                "venue_name": instance.event.venue.name if instance.event.venue else None,
+                "space_name": instance.event.space.name if instance.event.space else None,
             }
         )
 

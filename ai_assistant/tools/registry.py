@@ -23,6 +23,8 @@ from ai_assistant.tools.booking_tools import (
     prepare_payment_retry,
 )
 
+from ai_assistant.tools.knowledge_tools import search_knowledge_base
+
 from ai_assistant.tools.schemas import (
     PREPARE_CANCEL_BOOKING_TOOL,
     GET_ALL_EVENTS_TOOL,
@@ -32,6 +34,7 @@ from ai_assistant.tools.schemas import (
     SEARCH_EVENTS_TOOL,
     PREPARE_BOOKING_TOOL,
     PREPARE_PAYMENT_RETRY_TOOL,
+    SEARCH_KNOWLEDGE_BASE_TOOL,
 )
 
 TOOL_REGISTRY = {
@@ -80,5 +83,11 @@ TOOL_REGISTRY = {
         "requires_auth": True,
         "function": prepare_cancel_booking,
         "schema": PREPARE_CANCEL_BOOKING_TOOL,
+    },
+    "search_knowledge_base": {
+        "requires_auth": False,
+        "requires_chat_state": True,
+        "function": search_knowledge_base,
+        "schema": SEARCH_KNOWLEDGE_BASE_TOOL,
     },
 }
