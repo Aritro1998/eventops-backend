@@ -2,7 +2,6 @@ import logging
 
 from django.db.models import Max
 from django.db import transaction
-from django.utils import timezone
 from django.core.cache import cache
 from rest_framework import serializers
 from django.db.models import Count, Q, F
@@ -12,6 +11,7 @@ from rest_framework.viewsets import ModelViewSet
 from rest_framework.filters import OrderingFilter
 
 from .models import Event, Seat
+from bookings.models import Booking
 from core.permissions import IsAdminOrOrganizer
 from .serializers import EventReadSerializer, EventWriteSerializer
 
@@ -204,38 +204,46 @@ class EventViewSet(ModelViewSet):
                     for i in range(old_total_seats + 1, updated_event.total_seats + 1)
                 ])
             elif updated_event.total_seats < old_total_seats:
-                seats_above_limit = Seat.objects.filter(
-                    event=updated_event,
-                    seat_number__gt=updated_event.total_seats
+                # Lock the seats being considered for removal too, not just the
+                # event row above. create_booking() locks a Seat row, not the
+                # Event row, so without this a concurrent booking on one of
+                # these seats could commit in the gap between this check and
+                # the delete below and get silently deleted along with its
+                # seat and payment.
+                seat_ids_to_remove = list(
+                    Seat.objects.select_for_update().filter(
+                        event=updated_event,
+                        seat_number__gt=updated_event.total_seats
+                    ).values_list('id', flat=True)
                 )
 
-                active_bookings_exist = event.bookings.filter(
-                    seat__in=seats_above_limit
-                ).filter(
-                    Q(status='CONFIRMED') |
-                    Q(status__in=['PENDING', 'FAILED'], expires_at__gt=timezone.now())
+                # Block the reduction if ANY booking — active or historical —
+                # still references one of these seats. Deleting a Seat cascades
+                # to delete its Booking (and that Booking's Payment via
+                # Payment.booking's own CASCADE), so a seat that was ever
+                # booked, even by a long-cancelled or expired booking, must
+                # never be deleted or that booking/payment history is
+                # silently destroyed with it.
+                has_any_booking = Booking.objects.filter(
+                    seat_id__in=seat_ids_to_remove
                 ).exists()
 
-                if active_bookings_exist:
+                if has_any_booking:
                     logger.warning(
-                        "event_active_booking_reduction_blocked",
+                        "event_seat_history_reduction_blocked",
                         extra={
-                            "event": "event_active_booking_reduction_blocked",
+                            "event": "event_seat_history_reduction_blocked",
                             "event_id": updated_event.id,
                             "requested_total_seats": updated_event.total_seats,
                         }
                     )
                     raise serializers.ValidationError(
-                        "Cannot reduce total seats because some higher-numbered seats have active bookings."
+                        "Cannot reduce total seats because some higher-numbered seats have booking history (active or past)."
                     )
 
-                # Shrinking is only safe after we prove those higher-numbered seats are not
-                # still referenced by active bookings.
-                seats_to_remove = seats_above_limit.exclude(
-                    id__in=event.bookings.filter(status='CONFIRMED').values_list('seat_id', flat=True)
-                )
-                # Remove the unbooked seats that are above the new total_seats
-                seats_to_remove.delete()
+                # Safe to remove: proven above that no booking, of any status,
+                # references any of these seats.
+                Seat.objects.filter(id__in=seat_ids_to_remove).delete()
 
             logger.info(
                 "event_updated",
