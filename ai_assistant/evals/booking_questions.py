@@ -12,10 +12,14 @@ at the conversational level instead of via a code-level allowlist.
 def _book_one_seat_setup():
     from events.models import Event
     from events.services import EventService
-    event = Event.objects.order_by("id").first()
-    # This event has no Space, so display_label is null and the seat's
-    # label falls back to its plain seat_number as a string — see
-    # SeatSummarySerializer.get_label.
+    # Must be an event with no Space at all — not just order_by("id").first(),
+    # which silently started resolving to a general admission event once
+    # GA seed data existed, and a GA event correctly gets asked for a
+    # quantity instead of accepting a seat number, breaking this eval for
+    # a reason unrelated to what it's actually testing. A space-less event
+    # keeps display_label null, so the seat's label falls back to its
+    # plain seat_number as a string — see SeatSummarySerializer.get_label.
+    event = Event.objects.filter(space__isnull=True).order_by("id").first()
     seat_number = EventService.get_available_seats(event.id).first().seat_number
     return {
         "prompt": f"Book seat {seat_number} for {event.name}",
@@ -26,7 +30,9 @@ def _book_one_seat_setup():
 def _book_two_seats_setup():
     from events.models import Event
     from events.services import EventService
-    event = Event.objects.order_by("id").first()
+    # See _book_one_seat_setup for why this must exclude general admission
+    # events rather than just taking the lowest id.
+    event = Event.objects.filter(space__isnull=True).order_by("id").first()
     seat_numbers = list(
         EventService.get_available_seats(event.id).values_list("seat_number", flat=True)[:2]
     )

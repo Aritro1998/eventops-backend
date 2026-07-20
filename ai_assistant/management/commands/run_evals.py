@@ -12,8 +12,9 @@ from django.core.management.base import BaseCommand
 
 from users.models import User
 from ai_assistant.evals.runner import run_eval_suite
-from ai_assistant.evals.discovery_questions import DISCOVERY_QUESTIONS
 from ai_assistant.evals.booking_questions import BOOKING_QUESTIONS
+from ai_assistant.evals.knowledge_questions import KNOWLEDGE_QUESTIONS
+from ai_assistant.evals.discovery_questions import DISCOVERY_QUESTIONS
 
 
 class Command(BaseCommand):
@@ -21,7 +22,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--username", required=True)
-        parser.add_argument("--suite", choices=["discovery", "booking", "all"], default="all")
+        parser.add_argument("--suite", choices=["discovery", "booking", "knowledge", "all"], default="all")
 
     def handle(self, *args, **options):
         user = User.objects.get(username=options["username"])
@@ -31,6 +32,8 @@ class Command(BaseCommand):
             suites.append(("discovery", DISCOVERY_QUESTIONS))
         if options["suite"] in ("booking", "all"):
             suites.append(("booking", BOOKING_QUESTIONS))
+        if options["suite"] in ("knowledge", "all"):
+            suites.append(("knowledge", KNOWLEDGE_QUESTIONS))
 
         for name, questions in suites:
             self.stdout.write(f"\n=== {name} evals ===")
