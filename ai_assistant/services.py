@@ -14,15 +14,16 @@ instead of hanging or looping forever.
 
 import json
 import logging
-
-from openai import OpenAI
-from events.models import Event
+from openai import AsyncOpenAI
 from django.utils import timezone
-from core.settings.base import OPENAI_API_KEY
+from asgiref.sync import sync_to_async
+
+from events.models import Event
+from events.services import EventService
 from ai_assistant.chat_state import ChatState
 from ai_assistant.models import PendingBooking
-from events.services import EventService
 from ai_assistant.tools.registry import TOOL_REGISTRY
+from core.settings.base import OPENAI_API_KEY, OPENAI_CHAT_MODEL
 from ai_assistant.actions.booking_actions import get_pending_booking_draft
 from ai_assistant.actions.payment_actions import get_pending_payment_retry_draft
 from ai_assistant.actions.cancellation_actions import get_pending_cancellation_draft
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_CALLS = 5
 
 
-def get_system_prompt(user=None, request=None, chat_state=None):
+async def get_system_prompt(user=None, request=None, chat_state=None):
     """
     Rebuilt fresh on every call (not cached) since it embeds live,
     per-request state: the current time, whether there's a pending
@@ -52,15 +53,22 @@ def get_system_prompt(user=None, request=None, chat_state=None):
         user_info = "Current user is not authenticated."
 
     if user and user.is_authenticated:
-        pending_booking = PendingBooking.objects.filter(user=user).first()
+        # select_related('event') so pending_booking.event below doesn't
+        # trigger a lazy load — that lazy access would happen in this async
+        # function's own context (not inside a sync_to_async wrapper), so
+        # it would crash instead of just costing an extra query.
+        pending_booking = await PendingBooking.objects.filter(user=user).select_related('event').afirst()
         if pending_booking and pending_booking.is_expired:
-            pending_booking.delete()  # Delete the expired pending booking
+            await pending_booking.adelete()  # Delete the expired pending booking
             pending_booking = None
     else:
         pending_booking = None
 
     if pending_booking:
-        seat_display = EventService.describe_seats(pending_booking.event, pending_booking.seat_numbers)
+        # describe_seats is shared with sync callers elsewhere (confirm/cancel,
+        # the AI tools) so it stays sync itself — wrapped here rather than
+        # converted natively.
+        seat_display = await sync_to_async(EventService.describe_seats)(pending_booking.event, pending_booking.seat_numbers)
         seats_text = (
             f"{seat_display['seat_count']} ticket(s), general admission (no specific seats)"
             if seat_display["is_general_admission"]
@@ -98,7 +106,7 @@ def get_system_prompt(user=None, request=None, chat_state=None):
 
     selected_event_id = (chat_state or {}).get("selected_event_id")
     if selected_event_id:
-        selected_event = Event.objects.filter(id=selected_event_id).first()
+        selected_event = await Event.objects.filter(id=selected_event_id).afirst()
         if selected_event:
             selected_event_info = f"""
             - Current selected event: {selected_event.name}
@@ -252,25 +260,23 @@ def get_system_prompt(user=None, request=None, chat_state=None):
 
     return system_prompt
 
+
 class AIAssistantService:
     """
     Wraps the OpenAI client and runs the tool-calling conversation loop.
-    chat() and chat_stream() implement the same loop twice — once
-    buffered (returns one finished response) and once streamed (yields
-    pieces as OpenAI produces them) — because OpenAI's streaming and
-    non-streaming responses have a genuinely different shape to parse
-    (chat_stream has to reassemble tool-call fragments that arrive across
-    many chunks; chat() gets them whole). _run_tool is shared between the
-    two so the auth/kwargs/error-handling rules only exist in one place.
-    chat_stream is what the real frontend (gradio_app.py) actually calls.
+    chat_stream is the sole entry point — it's what the real frontend
+    (gradio_app.py) actually calls, reassembling tool-call fragments that
+    arrive across many streamed chunks. A non-streaming chat() variant
+    used to exist alongside it but was removed as unused.
     """
 
     def __init__(self):
-        self.client = OpenAI(api_key=OPENAI_API_KEY)
-        
-    def _run_tool(self, tool_name, args, user, request, conversation_id, chat_state):
-        """Execute one tool call. Shared by chat() and chat_stream() so the
-        auth/kwargs/error-handling rules live in exactly one place.
+        self.client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+    async def _run_tool(self, tool_name, args, user, request, conversation_id, chat_state):
+        """Execute one tool call, shared by every tool_calls round within
+        chat_stream's loop so the auth/kwargs/error-handling rules live in
+        exactly one place.
         """
         tool_config = TOOL_REGISTRY.get(tool_name)
 
@@ -293,7 +299,7 @@ class AIAssistantService:
         tool_function = tool_config["function"]
 
         try:
-            tool_result = tool_function(**kwargs)
+            tool_result = await sync_to_async(tool_function)(**kwargs)
         except ValueError as e:
             tool_result = {"error": str(e)}
         except Exception as e:
@@ -305,118 +311,15 @@ class AIAssistantService:
 
         return tool_result
 
-    def chat(self, user_prompt, user=None, request=None, conversation_id=None, chat_state=None):
-        """
-        Non-streaming variant — kept working but not what production
-        traffic uses (see class docstring). Returns
-        (response_text, draft, cancellation, payment_retry) once the
-        model settles on a final plain-text answer, after running
-        whatever tool calls it requested along the way.
-        """
-        # 1. Create the system prompt
-        messages = [
-            {
-                "role": "system",
-                "content": get_system_prompt(
-                    user=user,
-                    request=request,
-                    chat_state=chat_state,
-                )
-            },
-            *chat_state["history"],
-            {"role": "user", "content": user_prompt},
-        ]
-
-        # 2. Create the tools
-        tools = [
-            tool_config["schema"]
-            for tool_config in TOOL_REGISTRY.values()
-        ]
-
-        # 3. Make the first OpenAI call
-        try:
-            response = self.client.chat.completions.create(
-                model='gpt-4o-mini',
-                messages=messages,
-                temperature=0,
-                tools=tools,
-                parallel_tool_calls=False
-            )
-        except Exception:
-            logger.exception("openai_call_failed")
-            raise
-
-
-        # 4. Make the tool calls
-        for _ in range(MAX_TOOL_CALLS):
-            message = response.choices[0].message
-            # If there are no tool calls, add the turn and return the response
-            if not message.tool_calls:
-                # Persist only completed visible turns. Tool calls are local to
-                # this request; booking selection is separate structured state.
-                ChatState.add_turn(chat_state, "user", user_prompt)
-                ChatState.add_turn(chat_state, "assistant", message.content)
-                ChatState.save(conversation_id, chat_state)
-
-                # Always reflects whatever is actually in the database right
-                # now — same rule "actions" already follows — not gated on
-                # whether this exact turn's tool call happened to run.
-                # Guarded by is_authenticated: PendingBooking.user is a
-                # required FK, and an anonymous request's user is
-                # AnonymousUser (not None), which crashes the lookup.
-                if user and user.is_authenticated:
-                    draft = get_pending_booking_draft(user)
-                    cancellation = get_pending_cancellation_draft(user)
-                    payment_retry = get_pending_payment_retry_draft(user)
-                else:
-                    draft = cancellation = payment_retry = None
-                return message.content, draft, cancellation, payment_retry
-
-            messages.append(message)
-            for tool_call in message.tool_calls:
-                tool_name = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
-
-                tool_result = self._run_tool(
-                    tool_name, args, user, request, conversation_id, chat_state
-                )
-
-                # Add the tool result to the conversation history
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": json.dumps(tool_result)
-                    }
-                )
-
-            # 5. Make the second OpenAI call
-            try:
-                response = self.client.chat.completions.create(
-                    model='gpt-4o-mini',
-                    messages=messages,
-                    temperature=0,
-                    tools=tools,
-                    parallel_tool_calls=False
-                )
-            except Exception:
-                logger.exception("openai_followup_call_failed")
-                raise
-
-        return (
-            "[MAX_TOOL_CALLS_EXCEEDED] Sorry, I unfortunately I was unable to complete that request. "
-            "Please try again later."
-        ), None, None, None
-        
-    def chat_stream(self, user_prompt, user=None, request=None, conversation_id=None, chat_state=None, tool_call_log=None):
+    async def chat_stream(self, user_prompt, user=None, request=None, conversation_id=None, chat_state=None, tool_call_log=None):
         """
         Conversation loop that yields pieces as they arrive instead of returning one finished answer.
         """
         messages = [
             {
                 "role": "system",
-                "content": get_system_prompt(
-                    user=user, 
+                "content": await get_system_prompt(
+                    user=user,
                     request=request,
                     chat_state=chat_state,
                 ),
@@ -431,8 +334,8 @@ class AIAssistantService:
         
         for _ in range(MAX_TOOL_CALLS):
             try:
-                stream = self.client.chat.completions.create(
-                    model='gpt-4o-mini',
+                stream = await self.client.chat.completions.create(
+                    model=OPENAI_CHAT_MODEL,
                     messages=messages,
                     temperature=0,
                     tools=tools,
@@ -448,7 +351,7 @@ class AIAssistantService:
             # chunks — id/name/arguments each get built up piece by piece.
             tool_calls_by_index = {}
             
-            for chunk in stream:
+            async for chunk in stream:
                 delta = chunk.choices[0].delta
                 
                 if delta.content:
@@ -477,7 +380,7 @@ class AIAssistantService:
                 # This is just the wrap-up: save history, report what to show.
                 ChatState.add_turn(chat_state, "user", user_prompt)
                 ChatState.add_turn(chat_state, "assistant", full_text)
-                ChatState.save(conversation_id, chat_state)
+                await sync_to_async(ChatState.save)(conversation_id, chat_state)
 
                 # Always reflects whatever is actually in the database right
                 # now — same rule "actions" already follows — not gated on
@@ -486,9 +389,9 @@ class AIAssistantService:
                 # required FK, and an anonymous request's user is
                 # AnonymousUser (not None), which crashes the lookup.
                 if user and user.is_authenticated:
-                    draft = get_pending_booking_draft(user)
-                    cancellation = get_pending_cancellation_draft(user)
-                    payment_retry = get_pending_payment_retry_draft(user)
+                    draft = await get_pending_booking_draft(user)
+                    cancellation = await get_pending_cancellation_draft(user)
+                    payment_retry = await get_pending_payment_retry_draft(user)
                 else:
                     draft = cancellation = payment_retry = None
                 yield {
@@ -521,7 +424,7 @@ class AIAssistantService:
             
             for entry in tool_calls_by_index.values():
                 args = json.loads(entry["arguments"])
-                tool_result = self._run_tool(
+                tool_result = await self._run_tool(
                     entry["name"],
                     args,
                     user,

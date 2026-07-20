@@ -20,31 +20,37 @@ declare any combination of:
   rather than hardcoded values that would go stale as fixtures change.
 """
 
+from asgiref.sync import sync_to_async
+
 from ai_assistant.chat_state import ChatState
 from ai_assistant.services import AIAssistantService
 
 
-def run_eval(question, user):
+async def run_eval(question, user):
     """Run one eval question through the real chat_stream() method — the
     same code path the actual app uses — and check the outcome against
     what the question declares as correct."""
     if "setup" in question:
-        question = {**question, **question["setup"]()}
+        # setup callables (discovery_questions.py etc.) are plain sync
+        # functions doing ordinary ORM queries — they're eval fixtures, not
+        # part of the actual async chat surface, so they're wrapped here
+        # rather than individually converted.
+        question = {**question, **(await sync_to_async(question["setup"])())}
 
     # Evals must never see a leftover draft from a previous run — otherwise
     # the model correctly (and confusingly) reports "you already have a
     # pending draft" instead of exercising the behavior being tested.
     from ai_assistant.models import PendingBooking, PendingBookingCancellation, PendingPaymentRetry
-    PendingBooking.objects.filter(user=user).delete()
-    PendingBookingCancellation.objects.filter(user=user).delete()
-    PendingPaymentRetry.objects.filter(user=user).delete()
+    await sync_to_async(PendingBooking.objects.filter(user=user).delete)()
+    await sync_to_async(PendingBookingCancellation.objects.filter(user=user).delete)()
+    await sync_to_async(PendingPaymentRetry.objects.filter(user=user).delete)()
 
-    conversation_id, chat_state = ChatState.create(user=user)
+    conversation_id, chat_state = await sync_to_async(ChatState.create)(user=user)
     tool_call_log = []
 
     ai_service = AIAssistantService()
     response_text = ""
-    for event in ai_service.chat_stream(
+    async for event in ai_service.chat_stream(
         question["prompt"],
         user=user,
         request=None,
@@ -87,10 +93,10 @@ def run_eval(question, user):
     }
 
 
-def run_eval_suite(questions, user):
+async def run_eval_suite(questions, user):
     """Run every question in a list (see discovery_questions.py's
     DISCOVERY_QUESTIONS / booking_questions.py's BOOKING_QUESTIONS) and
     summarize pass/fail counts."""
-    results = [run_eval(q, user) for q in questions]
+    results = [await run_eval(q, user) for q in questions]
     passed = sum(1 for r in results if r["passed"])
     return {"total": len(results), "passed": passed, "failed": len(results) - passed, "results": results}

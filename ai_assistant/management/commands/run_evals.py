@@ -8,6 +8,8 @@ anywhere more obvious — that exact path structure is what Django's
 discovery mechanism requires, not a stylistic choice.
 """
 
+import asyncio
+
 from django.core.management.base import BaseCommand
 
 from users.models import User
@@ -37,7 +39,7 @@ class Command(BaseCommand):
 
         for name, questions in suites:
             self.stdout.write(f"\n=== {name} evals ===")
-            result = run_eval_suite(questions, user)
+            result = asyncio.run(run_eval_suite(questions, user))
             for r in result["results"]:
                 mark = "PASS" if r["passed"] else "FAIL"
                 self.stdout.write(f"[{mark}] {r['id']}")

@@ -7,6 +7,8 @@ read by the chat views themselves, so the frontend always knows whether
 to show the Confirm/Cancel controls.
 """
 
+from asgiref.sync import sync_to_async
+
 from events.models import Event, Seat
 from events.services import EventService
 from payments.services import PaymentService
@@ -33,19 +35,24 @@ def get_pending_booking_actions(user):
     ]
 
 
-def get_pending_booking_draft(user):
+async def get_pending_booking_draft(user):
     """Return the current draft's details for rendering, or None."""
 
-    pending = PendingBooking.for_user(user)
+    pending = await PendingBooking.afor_user(user)
 
     if not pending or pending.is_expired:
         return None
+
+    # describe_seats is shared with sync callers elsewhere (confirm/cancel,
+    # the AI tools) so it stays sync itself — wrapped here rather than
+    # converted natively.
+    seat_display = await sync_to_async(EventService.describe_seats)(pending.event, pending.seat_numbers)
 
     return {
         "event_name": pending.event.name,
         # Presentation only — see EventService.describe_seats. Identity
         # for confirmation still lives on pending.seat_numbers.
-        **EventService.describe_seats(pending.event, pending.seat_numbers),
+        **seat_display,
         "amount": str(pending.amount),
         "event_start_time": pending.event.start_time.isoformat(),
     }

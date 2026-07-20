@@ -216,3 +216,16 @@ EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS") == "True"
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Model choice and embedding dimension live here, not hardcoded in
+# ai_assistant/services.py or knowledge/, so switching models (e.g. to a
+# larger embedding model) is a config change, not a code change. Note
+# EMBEDDING_DIMENSIONS must match whatever OPENAI_EMBEDDING_MODEL actually
+# outputs (text-embedding-3-small -> 1536, text-embedding-3-large -> 3072) —
+# changing the model without updating this causes embedding calls to fail
+# against the existing pgvector column, and changing this value alone does
+# NOT alter an already-migrated database column; that still needs a new
+# migration.
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))

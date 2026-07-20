@@ -58,6 +58,10 @@ class PendingBooking(PendingActionBase):
     ai_assistant/actions/booking_actions.py) re-resolves them to real Seat
     ids and creates the actual Booking."""
 
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="pending_booking_event")
+    seat_numbers = models.JSONField(default=list)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    
     @classmethod
     def for_user(cls, user):
         """Every Pending* model repeats this same one-row-per-user lookup
@@ -66,15 +70,18 @@ class PendingBooking(PendingActionBase):
         needs different select_related/prefetch_related paths."""
         return cls.objects.select_related("event").filter(user=user).first()
 
-    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="pending_booking_event")
-    seat_numbers = models.JSONField(default=list)
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    @classmethod
+    async def afor_user(cls, user):
+        "Async version of for_user()"
+        return await cls.objects.select_related("event").filter(user=user).afirst()
 
 
 class PendingBookingCancellation(PendingActionBase):
     """Staged by ai_assistant/tools/booking_tools.py's prepare_cancel_booking.
     Points at an existing, already-CONFIRMED Booking — confirming this
     draft is what actually flips it to CANCELLED."""
+    
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='pending_cancellations')
 
     @classmethod
     def for_user(cls, user):
@@ -85,14 +92,24 @@ class PendingBookingCancellation(PendingActionBase):
             .filter(user=user)
             .first()
         )
-
-    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='pending_cancellations')
+        
+    @classmethod
+    async def afor_user(cls, user):
+        return await (
+            cls.objects
+            .select_related("booking__event")
+            .prefetch_related("booking__booking_seats__seat")
+            .filter(user=user)
+            .afirst()
+        )
 
 
 class PendingPaymentRetry(PendingActionBase):
     """Staged by ai_assistant/tools/booking_tools.py's prepare_payment_retry.
     Points at a FAILED/PENDING Booking — confirming this draft is what
     actually calls PaymentService.process_payment again."""
+    
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="pending_payment_retries")
 
     @classmethod
     def for_user(cls, user):
@@ -103,6 +120,15 @@ class PendingPaymentRetry(PendingActionBase):
             .filter(user=user)
             .first()
         )
+        
+    @classmethod
+    async def afor_user(cls, user):
+        return await (
+            cls.objects
+            .select_related("booking__event")
+            .prefetch_related("booking__booking_seats__seat")
+            .filter(user=user)
+            .afirst()
+        )
 
-    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="pending_payment_retries")
     

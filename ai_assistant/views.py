@@ -1,10 +1,8 @@
 """
-Two chat entry points exist: ChatView (request/response) and
-ChatStreamView (Server-Sent Events). The real frontend (gradio_app.py)
-calls chat_stream/ChatStreamView exclusively, for token-by-token
-streaming — ChatView/chat() still works and is kept for any client that
-wants a simple single-response call, but it is not what production
-traffic actually uses.
+ChatStreamView (Server-Sent Events) is the sole chat entry point — the
+real frontend (gradio_app.py) calls it exclusively, for token-by-token
+streaming. A non-streaming ChatView/chat() pairing used to exist
+alongside it but was removed as unused.
 
 Everything below ChatStreamView is one APIView per confirm/dismiss button
 a Pending* draft can show (see ai_assistant/models.py's module docstring
@@ -18,15 +16,26 @@ still-pending actions.
 
 import json
 import logging
+
 from .chat_state import ChatState
-from rest_framework import status
-from rest_framework.views import APIView
 from .services import AIAssistantService
 from core.throttles import BookingThrottle
+
+from django.views import View
+from rest_framework import status
+from django.http import JsonResponse
+from asgiref.sync import sync_to_async
+from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.http import StreamingHttpResponse
 from rest_framework.exceptions import APIException
+from django.views.decorators.csrf import csrf_exempt
+from django.contrib.auth.models import AnonymousUser
+from django.utils.decorators import method_decorator
 from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.exceptions import InvalidToken, AuthenticationFailed
+
 
 from .actions.booking_actions import (
     confirm_pending_booking,
@@ -87,67 +96,35 @@ def get_all_pending_actions(user):
     )
 
 
-class ChatView(APIView):
-    def post(self, request):
-        user_prompt = request.data.get('message', '').strip()
-        conversation_id = request.data.get("conversation_id")
-
-        if not user_prompt:
-            return Response(
-                {'error': 'Message is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        if conversation_id:
-            conversation_id, chat_state = ChatState.get(
-                conversation_id,
-                user=request.user
-            )
-        else:
-            conversation_id, chat_state = ChatState.create(user=request.user)
-
+@method_decorator(csrf_exempt, name='dispatch')
+class ChatStreamView(View):
+    async def post(self, request):
+        # Plain Django View skips DRF's authentication pipeline entirely —
+        # replicate the one piece this endpoint actually relies on (JWT)
+        # so request.user resolves correctly from the Authorization header
+        # instead of silently defaulting to AnonymousUser for every real user.
         try:
-            ai_service = AIAssistantService()
-            response, draft, cancellation, payment_retry = ai_service.chat(
-                user_prompt,
-                user=request.user,
-                request=request,
-                conversation_id=conversation_id,
-                chat_state=chat_state
+            auth_result = await sync_to_async(JWTAuthentication().authenticate)(request)
+        except (InvalidToken, AuthenticationFailed):
+            return JsonResponse(
+                {"error": "Invalid or expired token"},
+                status = status.HTTP_401_UNAUTHORIZED
             )
+        
+        request.user = auth_result[0] if auth_result is not None else AnonymousUser()
+        
+        # The request body is expected to be JSON, but the client may send
+        # invalid JSON or no body at all. In that case, treat it as an empty dict
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, TypeError):
+            body = {}
             
-            actions = get_all_pending_actions(request.user) if request.user.is_authenticated else []
-            
-            return Response(
-                {
-                    'response': response,
-                    'conversation_id': conversation_id,
-                    'actions': actions,
-                    'draft': draft,
-                    'cancellation': cancellation,
-                    'payment_retry': payment_retry,
-                }
-            )
-
-        except Exception:
-            # The client only ever sees the generic message below (never leak
-            # internals to an API response) — but without this log line, every
-            # 500 here looks identical in `docker logs` regardless of cause,
-            # which is exactly what made this bug hard to diagnose.
-            logger.exception("chat_view_failed")
-            return Response(
-                {'error': 'Failed to get AI response'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-
-class ChatStreamView(APIView):
-    def post(self, request):
-        user_prompt = request.data.get('message', '').strip()
-        conversation_id = request.data.get('conversation_id')
+        user_prompt = body.get('message', '').strip()
+        conversation_id = body.get('conversation_id')
         
         if not user_prompt:
-            return Response(
+            return JsonResponse(
                 {'error': 'Message is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
@@ -159,14 +136,14 @@ class ChatStreamView(APIView):
         # headers are already committed — errors there can't cleanly become
         # a different status code anymore.
         if conversation_id:
-            conversation_id, chat_state = ChatState.get(conversation_id, user=request.user)
+            conversation_id, chat_state = await sync_to_async(ChatState.get)(conversation_id, user=request.user)
         else:
-            conversation_id, chat_state = ChatState.create(user=request.user)
+            conversation_id, chat_state = await sync_to_async(ChatState.create)(user=request.user)
             
-        def event_stream():
+        async def event_stream():
             ai_service = AIAssistantService()
             try:
-                for event in ai_service.chat_stream(
+                async for event in ai_service.chat_stream(
                     user_prompt,
                     user=request.user,
                     request=request,
@@ -176,7 +153,7 @@ class ChatStreamView(APIView):
                     if event["type"] == "done":
                         event["conversation_id"] = conversation_id
                         event["actions"] = (
-                            get_all_pending_actions(request.user)
+                            await sync_to_async(get_all_pending_actions)(request.user)
                             if request.user.is_authenticated else []
                         )
                     

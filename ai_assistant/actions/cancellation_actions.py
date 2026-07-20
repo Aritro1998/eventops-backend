@@ -4,6 +4,8 @@ booking_actions.py's structure exactly (get_pending_*_actions/draft for
 the frontend, confirm_*/dismiss_* triggered only by a human button click).
 """
 
+from asgiref.sync import sync_to_async
+
 from ai_assistant.models import PendingBookingCancellation
 from bookings.services import BookingService
 
@@ -26,19 +28,23 @@ def get_pending_cancellation_actions(user):
     ]
     
 
-def get_pending_cancellation_draft(user):
+async def get_pending_cancellation_draft(user):
     """Return the staged cancellation's details for rendering, or None."""
-    
-    pending = PendingBookingCancellation.for_user(user)
+
+    pending = await PendingBookingCancellation.afor_user(user)
     
     if not pending or pending.is_expired:
         return None
     
     booking = pending.booking
+    # seat_display touches event.space (not covered by afor_user's
+    # prefetch) and is shared with sync callers elsewhere, so it's wrapped
+    # here rather than converted natively.
+    seat_display = await sync_to_async(booking.seat_display)()
     return {
         "booking_id": booking.id,
         "event_name": booking.event.name,
-        **booking.seat_display(),
+        **seat_display,
         "amount": str(booking.amount),
         "event_start_time": booking.event.start_time.isoformat(),
     }

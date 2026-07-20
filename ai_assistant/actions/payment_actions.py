@@ -7,6 +7,8 @@ and confirm_payment_retry themselves, so the retry controls reappear
 without the user having to ask the AI again.
 """
 
+from asgiref.sync import sync_to_async
+
 from payments.services import PaymentService
 from ai_assistant.models import PendingPaymentRetry, get_pending_action_expiry
 
@@ -49,24 +51,28 @@ def get_pending_payment_retry_actions(user):
     ]
     
     
-def get_pending_payment_retry_draft(user):
+async def get_pending_payment_retry_draft(user):
     """Return the staged retry's details for rendering, or None."""
-    
-    pending = PendingPaymentRetry.for_user(user)
+
+    pending = await PendingPaymentRetry.afor_user(user)
     
     if not pending or pending.is_expired:
         return None
-    
+
     if pending.booking.status not in ("FAILED", "PENDING"):
-        pending.delete()
+        await pending.adelete()
         return None
 
     booking = pending.booking
+    # seat_display touches event.space (not covered by afor_user's
+    # prefetch) and is shared with sync callers elsewhere, so it's wrapped
+    # here rather than converted natively.
+    seat_display = await sync_to_async(booking.seat_display)()
 
     return {
         "booking_id": booking.id,
         "event_name": booking.event.name,
-        **booking.seat_display(),
+        **seat_display,
         "amount": str(booking.amount),
         "event_start_time": booking.event.start_time.isoformat(),
         "expires_at": booking.expires_at.isoformat(),

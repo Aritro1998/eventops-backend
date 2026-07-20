@@ -4,18 +4,18 @@ from django.db import transaction
 from pgvector.django import CosineDistance
 
 from knowledge.models import KnowledgeChunk
-from core.settings.base import OPENAI_API_KEY
+from core.settings.base import OPENAI_API_KEY, OPENAI_EMBEDDING_MODEL
 
 
 class KnowledgeService:
     """
-    Chunking and embedding logic for KnowledgeDocument. 
+    Chunking and embedding logic for KnowledgeDocument.
     """
 
     MAX_CHUNK_CHARS = 1000
     MIN_CHUNK_CHARS = 100
     OVERLAP_CHARS = 150
-    EMBEDDING_MODEL = "text-embedding-3-small"
+    EMBEDDING_MODEL = OPENAI_EMBEDDING_MODEL
     
     @staticmethod
     def chunk_text(content):

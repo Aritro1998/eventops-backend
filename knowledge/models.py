@@ -3,6 +3,7 @@ from pgvector.django import VectorField
 
 from venues.models import Venue
 from events.models import Event
+from core.settings.base import EMBEDDING_DIMENSIONS
 
 # Create your models here.
 class KnowledgeDocument(models.Model):
@@ -45,7 +46,7 @@ class KnowledgeChunk(models.Model):
     """
     document = models.ForeignKey(KnowledgeDocument, on_delete=models.CASCADE, related_name='chunks')
     content = models.TextField()
-    embedding = VectorField(dimensions=1536) # text-embedding-3-small's output size
+    embedding = VectorField(dimensions=EMBEDDING_DIMENSIONS) # must match OPENAI_EMBEDDING_MODEL's output size
     chunk_index = models.PositiveIntegerField() # position within the parent document
     created_at = models.DateTimeField(auto_now_add=True)
     
