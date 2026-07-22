@@ -32,6 +32,14 @@ ALLOWED_HOSTS = ["*"]
 # that an app must appear before anything that references its models in
 # a migration dependency.
 INSTALLED_APPS = [
+    # Must be the very first entry - this is what makes `runserver` become
+    # Channels/daphne's ASGI-aware version instead of Django's plain WSGI
+    # one, which is required for the seat-picker WebSocket to work at all
+    # locally. Without this, `channels` alone does nothing for runserver -
+    # confirmed by testing: a raw WebSocket connect attempt returned a
+    # plain HTTP 404 (the WSGI server not recognizing the ws/ path) until
+    # this was added.
+    "daphne",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -41,6 +49,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "django_filters",
     "rest_framework_simplejwt",
+    "channels",
     "users",
     "events",
     "bookings",
@@ -151,6 +160,19 @@ CELERY_BEAT_SCHEDULE = {
     "cleanup-expired-pending-payment-retries": {
         "task": "workflows.tasks.cleanup_expired_pending_payment_retries_task",
         "schedule": crontab(minute="*/5"),
+    },
+}
+
+# Channels config, used for WebSocket support. The `channels_redis`
+# backend is the only one that supports multiple workers, so it's the
+# only one we use in production. The `hosts` value is a list of Redis
+# servers to connect to; we only have one, so it's a single-item list.
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [("redis", 6379)],
+        },
     },
 }
 

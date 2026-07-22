@@ -10,6 +10,7 @@ from .models import Booking, BookingSeat
 from events.models import Seat
 from workflows.models import WorkflowJob
 from workflows.services import schedule_job
+from events.broadcasts import broadcast_seat_update, broadcast_seats_update_for_booking
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +246,20 @@ class BookingService:
                             [BookingSeat(booking=booking, seat=seat) for seat in seats]
                         )
                         
+                        # Tell the live seat picker these seats just got
+                        # locked - status is always "locked" here, since
+                        # a freshly created booking is always PENDING;
+                        # if payment succeeds moments later, that's a
+                        # separate transition, broadcast from
+                        # PaymentService.process_payment instead.
+                        for seat in seats:
+                            transaction.on_commit(
+                                lambda seat_number=seat.seat_number:
+                                    broadcast_seat_update(
+                                        event.id, seat_number, "locked"
+                                    )
+                            )
+                        
                         # Invalidate event cache after successful booking creation
                         transaction.on_commit(
                             lambda: BookingService.invalidate_event_cache(event.id)
@@ -370,6 +385,10 @@ class BookingService:
             # rather than deleting the rows — booking history still shows
             # every seat this booking ever held.
             booking.release_seats()
+
+            transaction.on_commit(
+                lambda: broadcast_seats_update_for_booking(booking, "available")
+            )
             transaction.on_commit(
                 lambda: BookingService.invalidate_event_cache(event_id)
             )
@@ -412,3 +431,50 @@ class BookingService:
             )
             
         return bookings
+    
+    @staticmethod
+    def get_seat_statuses_for_event(event_id):
+        """
+        Return {seat_number: "available" | "locked" | "booked"} for every
+        seat belonging to this event, in one query rather than one query per
+        seat. This is what a client sees immediately upon connecting to the
+        seat-picker WebSocket, before any live update has arrived yet.
+
+        "booked" = a CONFIRMED booking holds this seat, permanently.
+        "locked" = a PENDING/FAILED booking holds it and hasn't expired yet -
+        someone else is mid-checkout; it releases automatically if they
+        don't finish in time.
+        "available" = neither of the above.
+        """
+        active_claims = (
+            BookingSeat.objects
+            .filter(seat__event_id=event_id)
+            .filter(BookingService.active_booking_q())
+            .values_list('seat__seat_number', 'booking__status')
+        )
+
+        claim_status_by_seat_number = {
+            seat_number: ("booked" if booking_status == "CONFIRMED" else "locked")
+            for seat_number, booking_status in active_claims
+        }
+
+        # seat_number is never shown to the user anywhere else in this
+        # app (see get_system_prompt: "seat_number is an internal id —
+        # never show it") - display_label is the public identity, with
+        # the same string-of-seat_number fallback used everywhere else
+        # (SeatSummarySerializer, EventService.describe_seats) for
+        # plain-numbered events that have no display_label at all.
+        # row/column (when present) let the frontend lay the grid out to
+        # match the venue's actual shape instead of an arbitrary flow.
+        seats = {}
+        for seat_number, display_label, row, column in Seat.objects.filter(event_id=event_id).values_list(
+            'seat_number', 'display_label', 'row', 'column'
+        ):
+            seats[seat_number] = {
+                "label": display_label or str(seat_number),
+                "row": row,
+                "column": column,
+                "status": claim_status_by_seat_number.get(seat_number, "available"),
+            }
+
+        return seats

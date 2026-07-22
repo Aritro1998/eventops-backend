@@ -127,7 +127,10 @@ async def get_system_prompt(user=None, request=None, chat_state=None):
         item, with columns for the fields relevant to that data (e.g. Event, Seat,
         Amount, Status, Booking ID for bookings). Never use a numbered list with
         bold field labels for multi-item results. A single item can still be
-        described in plain sentences. Never include an is_general_admission /
+        described in plain sentences. The one exception to this whole rule is
+        individual seat labels from get_available_seats — never list, table, or
+        enumerate those in any form; see the booking-flow instructions below for
+        why. Never include an is_general_admission /
         "General Admission" column in an event table — it's there for you to
         reason with (e.g. deciding whether to ask for seats or a quantity),
         not for the user to see as a listed field.
@@ -158,21 +161,36 @@ async def get_system_prompt(user=None, request=None, chat_state=None):
 
         Users do not know event ids or seat ids.
 
-        When a booking request is made:
-        1. Use search_events if needed.
-        2. Use get_available_seats.
+        MANDATORY, and applies every single time get_available_seats is
+        called, for ANY reason - a new booking request, "show me the
+        seats", "show the seats again", "list the available seats",
+        re-checking availability mid-conversation, or anything else -
+        regardless of how the user phrased the request and regardless of
+        whether you've already shown this event's seats earlier in this
+        conversation:
         If the result has general_admission: true, do NOT display a seat grid
         and do NOT ask the user to pick seats — tell them how many tickets
         are available and ask how many they want.
-        Otherwise, don't print the seats as a list — use a grid format
-        (10 columns and N rows) showing each seat's label field (e.g. "A1"),
-        never its seat_number. seat_number is an internal id — never show it
-        or ask the user for it.
+        Otherwise, your entire reply must be exactly this kind of sentence,
+        nothing before or after it: "Seats are available for [event name]
+        — check the live seat map next to this chat and let me know which
+        ones you'd like (e.g. 'A1, B4')." This holds even if the user
+        explicitly asks you to "show", "list", or "print" the seats, or to
+        show them "again" - never a list, a table, bullet points, or a
+        seat count in that case either. The user already sees every
+        seat's real-time status in the visual map; your only job here is
+        to point them at it. Never show or ask for seat_number — it's an
+        internal id.
         Always call get_available_seats again before telling the user which
         seats are available or accepting seat labels/quantity for a new booking,
         even if you already showed this earlier in this conversation.
         Availability can change between messages — never reuse a previous
         seats list or count from memory.
+
+        When a booking request is made:
+        1. Use search_events if needed.
+        2. Use get_available_seats (see the mandatory reply rule above for
+        how to present whatever it returns).
         3. For labeled events, ask which seats they want and pass seat_labels
         to prepare_booking — the exact label strings from get_available_seats
         (e.g. ["A1", "B4"]), never a seat_number, and never a label you have
@@ -394,11 +412,28 @@ class AIAssistantService:
                     payment_retry = await get_pending_payment_retry_draft(user)
                 else:
                     draft = cancellation = payment_retry = None
+
+                # Tells the frontend which event's live seat picker (if
+                # any) to show right now. Only meaningful for labeled
+                # (non-general-admission) events - general admission has
+                # no individual seats to pick, so the frontend shouldn't
+                # open a seat-picker connection for one. Field name must
+                # match what gradio_app.py's get_ai_response reads.
+                selected_event_id = chat_state.get("selected_event_id")
+                show_seat_picker = False
+                if selected_event_id:
+                    # select_related('space') so is_general_admission's
+                    # internal self.space access below doesn't trigger a
+                    # lazy load in this async function's own context.
+                    selected_event = await Event.objects.filter(id=selected_event_id).select_related('space').afirst()
+                    show_seat_picker = bool(selected_event) and not selected_event.is_general_admission
+
                 yield {
                     "type": "done",
                     "draft": draft,
                     "cancellation": cancellation,
                     "payment_retry": payment_retry,
+                    "seat_picker_event_id": selected_event_id if show_seat_picker else None,
                 }
                 return
             

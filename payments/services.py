@@ -7,6 +7,7 @@ from django.db import transaction
 from .models import Payment
 from bookings.models import Booking
 from bookings.services import BookingService
+from events.broadcasts import broadcast_seats_update_for_booking
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,9 @@ class PaymentService:
                 # is_active=True, so an expired booking releases its seats by
                 # flipping this flag rather than deleting the rows.
                 booking.release_seats()
+                transaction.on_commit(
+                    lambda: broadcast_seats_update_for_booking(booking, "available")
+                )
                 error_message = "Booking has expired"
                 logger.warning(
                     "payment_booking_expired",
@@ -87,6 +91,9 @@ class PaymentService:
                 booking.status = "EXPIRED"
                 booking.save(update_fields=["status", "updated_at"])
                 booking.release_seats()
+                transaction.on_commit(
+                    lambda: broadcast_seats_update_for_booking(booking, "available")
+                )
                 error_message = "Retry limit exceeded"
                 logger.warning(
                     "payment_retry_limit_exceeded",
@@ -140,6 +147,11 @@ class PaymentService:
                     payment.transaction_id = str(uuid.uuid4())
                     booking.status = "CONFIRMED"
                     event_id_to_invalidate = booking.event_id
+
+                    transaction.on_commit(
+                        lambda: broadcast_seats_update_for_booking(booking, "booked")
+                    )
+
                     logger.info(
                         "payment_succeeded",
                         extra={
@@ -157,6 +169,10 @@ class PaymentService:
                     # Decide next state
                     if booking.retry_count >= PaymentService.MAX_RETRIES or (booking.expires_at and booking.expires_at < now):
                         booking.status = "EXPIRED"
+
+                        transaction.on_commit(
+                            lambda: broadcast_seats_update_for_booking(booking, "available")
+                        )
                     else:
                         booking.status = "FAILED"
                     logger.warning(

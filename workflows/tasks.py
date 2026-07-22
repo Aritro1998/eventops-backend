@@ -22,6 +22,7 @@ from workflows.models import WorkflowJob
 from knowledge.models import KnowledgeDocument
 from knowledge.services import KnowledgeService
 from workflows.services import requeue_pending_jobs
+from events.broadcasts import broadcast_seats_update_for_booking
 
 logger = logging.getLogger(__name__)
 
@@ -383,6 +384,7 @@ def handle_booking_expiry(job):
         # an expired booking releases its seats by flipping this flag rather
         # than deleting the rows.
         booking.release_seats()
+        broadcast_seats_update_for_booking(booking, "available")
 
         logger.info(
             "booking_expired",

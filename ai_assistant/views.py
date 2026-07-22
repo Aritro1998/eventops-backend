@@ -59,8 +59,24 @@ from .actions.payment_actions import (
 logger = logging.getLogger(__name__)
 
 
-def persist_action_outcome(request, response_text):
-    """Store a button result as assistant context when its chat is still live."""
+def persist_action_outcome(request, response_text, clear_selected_event=False):
+    """Store a button result as assistant context when its chat is still live.
+
+    clear_selected_event: pass True only from the two action views that
+    resolve the CURRENTLY-selected event's own seat draft (confirm/cancel
+    booking) — once that resolves, chat_state["selected_event_id"] must
+    not linger, or the live seat picker reopens on the very next unrelated
+    message (get_available_seats is the only other place that sets it, and
+    nothing was clearing it — confirmed by direct reproduction: booking a
+    seat, confirming it, then sending "thanks!" still came back with the
+    same seat_picker_event_id, popping the picker back open for an already-
+    finished booking). Cancellation/retry actions must NOT pass True here —
+    those resolve a DIFFERENT, already-existing booking and can legitimately
+    fire while the user is still actively picking new seats for an unrelated
+    selected event (see gradio_app.py's action_updates: the three action
+    families are independent and can coexist), so clearing this there would
+    kill an unrelated, still-in-progress seat picker.
+    """
     conversation_id = request.data.get("conversation_id")
     if not conversation_id:
         return
@@ -75,6 +91,8 @@ def persist_action_outcome(request, response_text):
         return
 
     ChatState.add_turn(chat_state, "assistant", response_text)
+    if clear_selected_event:
+        chat_state["selected_event_id"] = None
     ChatState.save(conversation_id, chat_state)
     
     
@@ -191,7 +209,7 @@ class ConfirmPendingBookingActionView(APIView):
                 f"status {booking['status']}. Booking ID: {booking['booking_id']}."
             )
 
-        persist_action_outcome(request, response_text)
+        persist_action_outcome(request, response_text, clear_selected_event=True)
 
         return Response(
             {
@@ -216,7 +234,7 @@ class CancelPendingBookingActionView(APIView):
             )
 
         response_text = "Your pending booking draft has been cancelled."
-        persist_action_outcome(request, response_text)
+        persist_action_outcome(request, response_text, clear_selected_event=True)
 
         return Response(
             {

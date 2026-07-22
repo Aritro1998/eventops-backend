@@ -19,10 +19,15 @@ positional tuples. A handler can also be a generator (yield instead of
 return) to push multiple UI updates over time — that's what makes the
 streamed chat reply visibly type itself out (see get_ai_response).
 
-Only chat/stream is actually used (DJANGO_STREAM_API_URL) — chat/
-(DJANGO_API_URL, non-streaming) is defined but not called anywhere in
-this file; see ai_assistant/views.py's module docstring for why that
-endpoint still exists.
+The live seat picker (SEAT_PICKER_JS, near the bottom) is a deliberate
+exception to the "talks purely over HTTP" line above — it's a raw
+browser WebSocket connection straight to Django's Channels consumer
+(events/consumers.py), opened and painted entirely in JS. Gradio's own
+update model (a Python function returns new values, Gradio re-renders)
+isn't built for server-push updates arriving on their own schedule, so
+this one piece intentionally steps outside it: Gradio only tells the
+browser *when* to connect (see active_seat_event_id's .change() handler
+below), the live painting happens independently of Gradio's render loop.
 """
 
 import json
@@ -32,8 +37,14 @@ from datetime import datetime
 from html import escape
 
 
-DJANGO_API_URL = "http://web:8000/api/ai-assistant/chat/"
 DJANGO_STREAM_API_URL = "http://web:8000/api/ai-assistant/chat/stream/"
+# "web:8000" above only resolves inside Docker's own network, which is
+# fine for requests.post() calls made from this Python process — but the
+# seat-picker WebSocket is opened directly by the browser's own JS, which
+# runs on the user's host machine and has no idea what "web" means. It
+# needs the same host:port docker-compose actually publishes for the
+# Django service (see docker-compose.yml's "8000:8000" port mapping).
+DJANGO_WS_HOST = "localhost:8000"
 CONFIRM_DRAFT_URL = (
     "http://web:8000/api/ai-assistant/actions/confirm-pending-booking/"
 )
@@ -69,9 +80,12 @@ BRAND_HEADER_HTML = (
 
 CUSTOM_CSS = """
 .gradio-container {
-    max-width: 1320px !important;
-    margin: 0 auto !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 24px 32px !important;
     font-size: 16px !important;
+    box-sizing: border-box !important;
 }
 
 /* ---------- Sidebar shell ---------- */
@@ -199,6 +213,11 @@ CUSTOM_CSS = """
     border-radius: 18px !important;
     overflow: hidden;
     background: var(--background-fill-primary);
+    /* Anchors the floating seat picker panel below - it's positioned
+       relative to this container, not the whole page. !important since
+       Gradio's own scoped Svelte styles on this element otherwise win
+       the cascade over a plain (non-!important) declaration here. */
+    position: relative !important;
 }
 
 .message-row {
@@ -258,6 +277,17 @@ CUSTOM_CSS = """
     border-radius: 999px !important;
     font-size: 15px !important;
     padding: 12px 18px !important;
+    /* Gradio's own autosize JS sets an inline height directly on this
+       element, and on the full-width layout below it miscalculates a huge
+       value (measured a growth to 380px+ during testing, ballooning the
+       999px border-radius into a near-circle). !important here beats that
+       inline style the same way .chat-panel's position: relative above
+       beats Gradio's own scoped class - clamping to a fixed single-line
+       height regardless of what Gradio's JS computes. */
+    height: 48px !important;
+    min-height: 48px !important;
+    max-height: 48px !important;
+    overflow-y: hidden !important;
 }
 .composer button {
     border-radius: 999px !important;
@@ -265,6 +295,255 @@ CUSTOM_CSS = """
     font-size: 15px !important;
     font-weight: 600 !important;
 }
+
+/* ---------- Live seat picker ----------
+   A floating overlay anchored to the top-right of .chat-panel (see its
+   position: relative above), not a full-width strip pushed below the
+   chat — it appears over the conversation instead of consuming its own
+   row of otherwise-empty page space. */
+/* #seat-picker, not .seat-picker - gr.HTML(..., elem_id="seat-picker")
+   sets an id attribute, not a class, so a class selector here silently
+   never matches at all (confirmed via element.matches() during testing
+   - this was the actual reason positioning never applied, not a
+   specificity fight). */
+#seat-picker {
+    display: none !important;
+    position: absolute !important;
+    top: 16px !important;
+    right: 16px !important;
+    left: auto !important;
+    width: 340px !important;
+    max-height: calc(100% - 32px) !important;
+    overflow-y: auto !important;
+    padding: 14px 16px !important;
+    border-radius: 14px !important;
+    border: 1px solid var(--border-color-primary);
+    /* 90% see-through so the chat behind it stays legible. Plain
+       color-mix(bg 50%, transparent) turned out invisible in testing -
+       .chat-panel and the page behind it are the exact same flat color,
+       and X% of a color over that identical color always renders as
+       100% of it, so "transparent" had nothing different to blend with.
+       Mixing in a slice of --body-text-color first gives the panel its
+       own slightly tinted base (visibly distinct from the flat page in
+       both light/dark themes) before making that 10% alpha - so it reads
+       as glass rather than just another opaque white rectangle, and
+       whatever scrolls underneath (chat bubbles, seat cells) genuinely
+       shows through with a tint instead of being fully hidden.
+       No backdrop-filter here - blur() was sampling the purple accent
+       buttons/bubbles nearby and bleeding a muddy blue-purple wash across
+       the seat grid, which is what actually read as "weird colours". */
+    background: color-mix(
+        in srgb,
+        color-mix(in srgb, var(--body-text-color) 12%, var(--background-fill-primary) 88%) 10%,
+        transparent
+    ) !important;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+    z-index: 20;
+}
+#seat-picker.visible {
+    display: block !important;
+}
+/* While the picker is open, shrink the message list's own width instead
+   of letting bubbles run underneath the panel - actual CSS text-wrap
+   (shape-outside/float) can't reach across sibling bubbles here, since
+   Gradio renders each chat turn as its own separate block-level div, not
+   one continuous text flow, so there's no single flow for text to wrap
+   around. Reserving the panel's footprint on .bubble-wrap (the shared
+   scrollable container for every message row) is what actually keeps
+   bubbles clear of it: .message-row's own max-width: 74% then resolves
+   against this narrower box, so every bubble - old and new - naturally
+   staying left of the panel instead of continuing to run underneath it. */
+.chat-panel:has(#seat-picker.visible) .bubble-wrap {
+    padding-right: 372px !important;
+    box-sizing: border-box !important;
+    transition: padding-right 0.15s ease;
+}
+.seat-picker-close {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--body-text-color-subdued);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 6px;
+    padding: 0;
+}
+.seat-picker-close:hover {
+    background: var(--background-fill-secondary);
+    color: var(--body-text-color);
+}
+.seat-picker-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--body-text-color-subdued);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 8px;
+}
+.seat-picker-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 10px;
+    font-size: 11px;
+    color: var(--body-text-color);
+}
+.seat-picker-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+.seat-picker-swatch {
+    width: 11px;
+    height: 11px;
+    border-radius: 3px;
+    border: 1px solid var(--border-color-primary);
+    flex-shrink: 0;
+}
+.seat-picker-swatch.available { background: var(--background-fill-primary); }
+.seat-picker-swatch.locked { background: #fde68a; }
+.seat-picker-swatch.booked { background: #fca5a5; }
+
+.seat-picker-grid {
+    display: grid;
+    gap: 3px;
+    width: 100%;
+}
+.seat-cell {
+    aspect-ratio: 1;
+    width: 100%;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 5px;
+    font-size: 8px;
+    font-weight: 600;
+    border: 1px solid var(--border-color-primary);
+    transition: background-color 0.2s ease;
+}
+/* Colour is the only thing that changes live — status classes get
+   swapped by the JS below as seat_update messages arrive. */
+.seat-cell.available { background: var(--background-fill-primary); color: var(--body-text-color); }
+.seat-cell.locked { background: #fde68a; color: #78350f; }
+.seat-cell.booked { background: #fca5a5; color: #7f1d1d; }
+"""
+
+# Defines the JS functions, loaded once into the page <head> (see
+# demo.launch(head=...) at the bottom of this file) so they're available
+# globally for the active_seat_event_id.change(js=...) handler to call.
+# This is a raw browser WebSocket, opened and painted independently of
+# Gradio's own Python-round-trip update model — see the module docstring
+# at the top of this file for why that's a deliberate choice here.
+#
+# Every literal { and } in the JS below is doubled ({{ / }}) because this
+# is a Python f-string — only {DJANGO_WS_HOST} is a real Python
+# interpolation, everything else needs escaping so Python doesn't try to
+# treat it as a format field.
+SEAT_PICKER_HEAD = f"""
+<script>
+let seatSocket = null;
+
+function disconnectSeatPicker() {{
+    if (seatSocket) {{
+        seatSocket.close();
+        seatSocket = null;
+    }}
+    const container = document.getElementById("seat-picker");
+    if (container) {{
+        container.classList.remove("visible");
+        container.innerHTML = "";
+    }}
+}}
+
+function renderSeatGrid(seats) {{
+    const grid = document.getElementById("seat-picker-grid");
+    if (!grid) return;
+    grid.innerHTML = "";
+
+    const seatNumbers = Object.keys(seats);
+    // Plain-numbered events (no Space, no row/column data) fall back to
+    // a simple 10-wide flow; labeled events lay out to match the venue's
+    // actual shape instead of an arbitrary flow.
+    const hasLayout = seatNumbers.every(function(n) {{
+        return seats[n].row !== null && seats[n].column !== null;
+    }});
+
+    if (hasLayout) {{
+        const maxColumn = Math.max.apply(null, seatNumbers.map(function(n) {{ return seats[n].column; }}));
+        // 1fr, not a fixed pixel width - columns share the panel's
+        // actual available width evenly, so any column count (8, 12,
+        // whatever the venue has) fits without overflowing or needing
+        // this number kept in sync with the panel's CSS width by hand.
+        grid.style.gridTemplateColumns = "repeat(" + maxColumn + ", 1fr)";
+        seatNumbers.sort(function(a, b) {{
+            return (seats[a].row - seats[b].row) || (seats[a].column - seats[b].column);
+        }});
+    }} else {{
+        grid.style.gridTemplateColumns = "repeat(8, 1fr)";
+        seatNumbers.sort(function(a, b) {{ return a - b; }});
+    }}
+
+    seatNumbers.forEach(function(seatNumber) {{
+        const seat = seats[seatNumber];
+        const cell = document.createElement("div");
+        cell.className = "seat-cell " + seat.status;
+        cell.id = "seat-" + seatNumber;
+        // Never the raw seat_number - "label" is display_label
+        // (e.g. "A1"), the same public identity shown everywhere else
+        // in the app, falling back to seat_number as a string only for
+        // events with no display_label at all.
+        cell.innerText = seat.label;
+        grid.appendChild(cell);
+    }});
+}}
+
+function connectSeatPicker(eventId) {{
+    // Always start clean - if a picker for a different event was already
+    // open, close it first rather than layering a second connection.
+    disconnectSeatPicker();
+
+    const container = document.getElementById("seat-picker");
+    if (!container) return;
+    container.classList.add("visible");
+    container.innerHTML = (
+        "<button class='seat-picker-close' onclick='disconnectSeatPicker()' aria-label='Close seat picker' title='Close'>&times;</button>" +
+        "<div class='seat-picker-title'>Live seat availability</div>" +
+        "<div class='seat-picker-legend'>" +
+            "<div class='seat-picker-legend-item'><span class='seat-picker-swatch available'></span>Available</div>" +
+            "<div class='seat-picker-legend-item'><span class='seat-picker-swatch locked'></span>Being booked</div>" +
+            "<div class='seat-picker-legend-item'><span class='seat-picker-swatch booked'></span>Booked</div>" +
+        "</div>" +
+        "<div class='seat-picker-grid' id='seat-picker-grid'></div>"
+    );
+
+    seatSocket = new WebSocket("ws://{DJANGO_WS_HOST}/ws/events/" + eventId + "/seats/");
+
+    seatSocket.onmessage = function(event) {{
+        const data = JSON.parse(event.data);
+
+        if (data.type === "snapshot") {{
+            renderSeatGrid(data.seats);
+        }} else if (data.type === "seat_update") {{
+            // A single seat's real status changed (someone else just
+            // locked/booked/released it) - repaint only that one cell,
+            // not the whole grid.
+            const cell = document.getElementById("seat-" + data.seat_number);
+            if (cell) {{
+                cell.className = "seat-cell " + data.status;
+            }}
+        }}
+    }};
+}}
+</script>
 """
 
 # ---------- Formatting / HTML-card rendering helpers ----------
@@ -703,7 +982,7 @@ def get_ai_response(history, token, conversation_id, current_actions):
     """
     # Nothing to do if add_user_message skipped an empty message.
     if not history or history[-1]["role"] != "user":
-        yield history, conversation_id, *action_updates(current_actions)
+        yield history, conversation_id, *action_updates(current_actions), gr.update()
         return
 
     message = history[-1]["content"]
@@ -719,18 +998,22 @@ def get_ai_response(history, token, conversation_id, current_actions):
         if event_type == "chunk":
             accumulated_text += payload
             history[-1]["content"] = accumulated_text
-            yield history, conversation_id, *action_updates(current_actions)
+            # gr.update() here means "leave the seat-picker textbox
+            # exactly as it is" — we don't know yet this turn whether it
+            # should change, and every yield in this generator must
+            # supply a value for every output Gradio is wired to.
+            yield history, conversation_id, *action_updates(current_actions), gr.update()
         elif event_type == "done":
             final_event = payload
         elif event_type == "error":
             history[-1]["content"] = payload
-            yield history, conversation_id, *action_updates(current_actions)
+            yield history, conversation_id, *action_updates(current_actions), gr.update()
             return
 
     if final_event is None:
         # Connection dropped mid-stream with no "done" event at all — keep
         # whatever text did arrive rather than losing it silently.
-        yield history, conversation_id, *action_updates(current_actions)
+        yield history, conversation_id, *action_updates(current_actions), gr.update()
         return
 
     conversation_id = final_event.get("conversation_id", conversation_id)
@@ -753,7 +1036,14 @@ def get_ai_response(history, token, conversation_id, current_actions):
     elif payment_retry:
         history[-1]["content"] = render_payment_retry_prepare_card(payment_retry)
 
-    yield history, conversation_id, *action_updates(actions)
+    # None (no event in focus, or a general-admission event with no seat
+    # grid) becomes "" — an empty string is a real value change Gradio
+    # will notice and fire .change() for, unlike None, so the JS handler
+    # reliably runs disconnectSeatPicker() when the picker should hide.
+    seat_picker_event_id = final_event.get("seat_picker_event_id")
+    seat_picker_value = str(seat_picker_event_id) if seat_picker_event_id else ""
+
+    yield history, conversation_id, *action_updates(actions), seat_picker_value
 
 
 def run_draft_action(url, token, history, current_actions, conversation_id, action_label):
@@ -782,7 +1072,14 @@ def run_draft_action(url, token, history, current_actions, conversation_id, acti
 
     # A failed action keeps the existing controls available for a retry.
     actions = data.get("actions", current_actions)
-    return history, *action_updates(actions)
+
+    # A CONFIRMED booking means there's nothing left to pick a seat for -
+    # close the live seat picker automatically instead of leaving it open
+    # pointing at seats that are now booked. "" is what active_seat_event_id
+    # uses to mean "no picker should be shown" (see get_ai_response above).
+    seat_picker_update = "" if booking and booking.get("status") == "CONFIRMED" else gr.update()
+
+    return history, *action_updates(actions), seat_picker_update
 
 
 # ---------- UI layout + wiring ----------
@@ -797,6 +1094,7 @@ with gr.Blocks(
     title="EventOps AI Assistant",
     theme=gr.themes.Soft(),
     css=CUSTOM_CSS,
+    head=SEAT_PICKER_HEAD,
 ) as demo:
     token_state = gr.State(None)
     conversation_id_state = gr.State(None)
@@ -844,6 +1142,22 @@ with gr.Blocks(
                 value=[WELCOME_MESSAGE],
                 show_label=False,
             )
+
+            # The visible live seat grid — starts empty/hidden (see the
+            # .seat-picker CSS rule above), and SEAT_PICKER_JS's
+            # connectSeatPicker() paints into it directly once a
+            # WebSocket connection is open. Gradio never re-renders this
+            # component's contents itself; its Python-side value is just
+            # a static placeholder.
+            gr.HTML("", elem_id="seat-picker")
+
+            # Hidden — never shown to the user, purely a signalling
+            # channel. Whenever the backend reports a different
+            # seat_picker_event_id (see get_ai_response below), this
+            # textbox's value changes, which fires the .change(js=...)
+            # handler further down that actually opens/closes the socket.
+            active_seat_event_id = gr.Textbox(value="", visible=False, elem_id="active-seat-event-id")
+
             with gr.Row(visible=False, elem_classes=["draft-actions"]) as action_row:
                 confirm_draft_btn = gr.Button("Confirm booking", variant="primary", visible=False)
                 cancel_draft_btn = gr.Button("Cancel draft", variant="secondary", visible=False)
@@ -917,7 +1231,18 @@ with gr.Blocks(
         confirm_retry_btn,
         dismiss_retry_btn,
         composer_row,
+        active_seat_event_id,
     ]
+
+    # Fires whenever get_ai_response changes active_seat_event_id's value
+    # (see the yield at the end of that function) — fn=None means no
+    # Python handler runs, only the js one. An empty string means "no
+    # picker should be shown right now."
+    active_seat_event_id.change(
+        fn=None,
+        inputs=[active_seat_event_id],
+        js="(eventId) => { if (eventId) { connectSeatPicker(eventId); } else { disconnectSeatPicker(); } }",
+    )
     send_btn.click(
         fn=add_user_message, inputs=[msg, chatbot], outputs=[chatbot, msg]
     ).then(fn=get_ai_response, inputs=ai_response_inputs, outputs=ai_response_outputs)
@@ -939,6 +1264,7 @@ with gr.Blocks(
         confirm_retry_btn,
         dismiss_retry_btn,
         composer_row,
+        active_seat_event_id,
     ]
     confirm_draft_btn.click(
         fn=lambda token, history, actions, conversation_id: run_draft_action(
