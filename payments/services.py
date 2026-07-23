@@ -6,7 +6,7 @@ from django.db import transaction
 
 from .models import Payment
 from bookings.models import Booking
-from bookings.services import BookingService
+from events.caching import invalidate_event_cache
 from events.broadcasts import broadcast_seats_update_for_booking
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,6 @@ class PaymentService:
         # success = random.choice([True] * 9 + [False])
         success = random.choice([True, False])
         error_message = None
-        event_id_to_invalidate = None
 
         with transaction.atomic():
 
@@ -72,10 +71,10 @@ class PaymentService:
                 # unique_seat_claim only enforces uniqueness while
                 # is_active=True, so an expired booking releases its seats by
                 # flipping this flag rather than deleting the rows.
+                # release_seats() itself broadcasts the live update and
+                # invalidates the event cache now, so nothing further is
+                # needed here.
                 booking.release_seats()
-                transaction.on_commit(
-                    lambda: broadcast_seats_update_for_booking(booking, "available")
-                )
                 error_message = "Booking has expired"
                 logger.warning(
                     "payment_booking_expired",
@@ -91,9 +90,6 @@ class PaymentService:
                 booking.status = "EXPIRED"
                 booking.save(update_fields=["status", "updated_at"])
                 booking.release_seats()
-                transaction.on_commit(
-                    lambda: broadcast_seats_update_for_booking(booking, "available")
-                )
                 error_message = "Retry limit exceeded"
                 logger.warning(
                     "payment_retry_limit_exceeded",
@@ -146,10 +142,16 @@ class PaymentService:
                     payment.status = "SUCCESS"
                     payment.transaction_id = str(uuid.uuid4())
                     booking.status = "CONFIRMED"
-                    event_id_to_invalidate = booking.event_id
 
                     transaction.on_commit(
                         lambda: broadcast_seats_update_for_booking(booking, "booked")
+                    )
+                    # Payment success doesn't go through release_seats() -
+                    # the seats are being confirmed, not released - so this
+                    # is the one remaining case that still needs its own
+                    # explicit cache invalidation.
+                    transaction.on_commit(
+                        lambda: invalidate_event_cache(booking.event_id)
                     )
 
                     logger.info(
@@ -166,13 +168,11 @@ class PaymentService:
                     booking.retry_count += 1
                     payment.status = "FAILED"
 
-                    # Decide next state
+                    # Decide next state - if this becomes EXPIRED,
+                    # release_seats() below (once booking.status is saved)
+                    # handles the broadcast and cache invalidation itself.
                     if booking.retry_count >= PaymentService.MAX_RETRIES or (booking.expires_at and booking.expires_at < now):
                         booking.status = "EXPIRED"
-
-                        transaction.on_commit(
-                            lambda: broadcast_seats_update_for_booking(booking, "available")
-                        )
                     else:
                         booking.status = "FAILED"
                     logger.warning(
@@ -193,12 +193,6 @@ class PaymentService:
                 if booking.status == "EXPIRED":
                     booking.release_seats()
 
-                if event_id_to_invalidate is not None:
-                    transaction.on_commit(
-                        lambda event_id=event_id_to_invalidate:
-                            BookingService.invalidate_event_cache(event_id)
-                    )
-                    
         if error_message:
             raise ValueError(error_message)
 

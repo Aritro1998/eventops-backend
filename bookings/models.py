@@ -6,9 +6,9 @@ released independently — see BookingSeat.is_active below for why that
 matters.
 """
 
-from django.db import models
 from django.db.models import Q
 from django.utils import timezone
+from django.db import models, transaction
 
 from users.models import User
 from events.models import Event, Seat
@@ -63,8 +63,25 @@ class Booking(models.Model):
         every seat this booking ever held. Call this whenever the booking
         transitions to a state that no longer holds its seats (CANCELLED,
         EXPIRED).
+        
+        Also broadcasts the live seat update and invalidates the event
+        cache. So that no missed seat release can leave the event's seat map or cache stale.
+        
+        transaction.on_commit is safe here regardless of whether the
+        caller has an open atomic block: Django fires it immediately if
+        none is active, and defers it to the real commit if one is
+        (verified directly) — so this doesn't need to know which of its
+        callers wraps it in a transaction and which doesn't.
         """
+        from events.broadcasts import broadcast_seats_update_for_booking
+        from events.caching import invalidate_event_cache
+        
+        # Mark the booking's seats as no longer active, so they can be claimed by someone else.
         self.booking_seats.update(is_active=False)
+        # Broadcast the seat release to any live clients watching this event.
+        transaction.on_commit(lambda: broadcast_seats_update_for_booking(self, "available"))
+        # Invalidate the event cache so that any cached seat map or availability data is refreshed.
+        transaction.on_commit(lambda: invalidate_event_cache(self.event_id))
 
     def seat_display(self):
         """

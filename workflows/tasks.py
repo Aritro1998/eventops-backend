@@ -22,7 +22,6 @@ from workflows.models import WorkflowJob
 from knowledge.models import KnowledgeDocument
 from knowledge.services import KnowledgeService
 from workflows.services import requeue_pending_jobs
-from events.broadcasts import broadcast_seats_update_for_booking
 
 logger = logging.getLogger(__name__)
 
@@ -382,9 +381,10 @@ def handle_booking_expiry(job):
         booking.save(update_fields=["status", "updated_at"])
         # unique_seat_claim only enforces uniqueness while is_active=True, so
         # an expired booking releases its seats by flipping this flag rather
-        # than deleting the rows.
+        # than deleting the rows. release_seats() itself broadcasts the live
+        # update and invalidates the event cache now, so nothing further is
+        # needed here.
         booking.release_seats()
-        broadcast_seats_update_for_booking(booking, "available")
 
         logger.info(
             "booking_expired",

@@ -3,14 +3,14 @@ import logging
 from datetime import timedelta
 from django.db.models import Q
 from django.utils import timezone
-from django.core.cache import cache
 from django.db import transaction, IntegrityError
 
 from .models import Booking, BookingSeat
 from events.models import Seat
 from workflows.models import WorkflowJob
 from workflows.services import schedule_job
-from events.broadcasts import broadcast_seat_update, broadcast_seats_update_for_booking
+from events.caching import invalidate_event_cache
+from events.broadcasts import broadcast_seat_update
 
 logger = logging.getLogger(__name__)
 
@@ -26,20 +26,6 @@ class BookingService:
     """
 
     EXPIRY_MINUTES = 15
-
-    @staticmethod
-    def invalidate_event_cache(event_id):  
-        cache.delete(f"event:{event_id}")
-        if hasattr(cache, "delete_pattern"):
-            cache.delete_pattern("events:list:*")
-        logger.info(
-            "event_cache_invalidated",
-            extra={
-                "event": "event_cache_invalidated",
-                "event_id": event_id,
-                "source": "booking_service",
-            }
-        )
 
     @staticmethod
     def get_existing_booking(user, key):
@@ -262,7 +248,7 @@ class BookingService:
                         
                         # Invalidate event cache after successful booking creation
                         transaction.on_commit(
-                            lambda: BookingService.invalidate_event_cache(event.id)
+                            lambda: invalidate_event_cache(event.id)
                         )
 
                         logger.info(
@@ -383,15 +369,10 @@ class BookingService:
             # unique_seat_claim only enforces uniqueness while is_active=True,
             # so a cancelled booking releases its seats by flipping this flag
             # rather than deleting the rows — booking history still shows
-            # every seat this booking ever held.
+            # every seat this booking ever held. release_seats() itself now
+            # broadcasts the live update and invalidates the event cache,
+            # so nothing further is needed here.
             booking.release_seats()
-
-            transaction.on_commit(
-                lambda: broadcast_seats_update_for_booking(booking, "available")
-            )
-            transaction.on_commit(
-                lambda: BookingService.invalidate_event_cache(event_id)
-            )
 
         logger.info(
             "booking_cancelled",

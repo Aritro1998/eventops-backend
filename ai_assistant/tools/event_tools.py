@@ -11,7 +11,9 @@ import logging
 
 from events.services import EventService
 from ai_assistant.chat_state import ChatState
-from events.serializers import EventReadSerializer, EventSummarySerializer, SeatSummarySerializer
+from events.caching import get_events_list_cached, get_event_detail_cached
+from events.serializers import  EventSummarySerializer, SeatSummarySerializer
+
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +31,13 @@ def get_all_events(date_filter=None, start_date=None, end_date=None, ordering=No
             "ordering": ordering,
         }
     )
-    events = EventService.get_events_with_available_seats(
+    
+    return get_events_list_cached(
         date_filter=date_filter,
         start_date=start_date,
         end_date=end_date,
-        ordering=ordering
+        ordering=ordering,
     )
-    serializer = EventReadSerializer(events, many=True)
-    return serializer.data
 
 
 def get_event_detail(event_id, conversation_id, chat_state):
@@ -56,9 +57,7 @@ def get_event_detail(event_id, conversation_id, chat_state):
     if event_id not in chat_state.get("searched_event_ids", []):
         raise ValueError("Use search_events to look up this event before getting its details.")
 
-    event = EventService.get_event_detail(event_id)
-    serializer = EventReadSerializer(event)
-    return serializer.data
+    return get_event_detail_cached(event_id)
 
 
 def get_available_seats(request, event_id, conversation_id, chat_state):

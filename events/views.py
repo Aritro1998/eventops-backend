@@ -1,19 +1,17 @@
 import logging
 
 from django.db import transaction
-from django.core.cache import cache
-from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.viewsets import ModelViewSet
-from rest_framework.filters import OrderingFilter
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError, NotFound
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 from .models import Event
 from .services import EventService
-from bookings.services import BookingService
 from core.permissions import IsAdminOrOrganizer
 from .serializers import EventReadSerializer, EventWriteSerializer
+from .caching import get_events_list_cached, get_event_detail_cached, invalidate_event_cache
 
 logger = logging.getLogger(__name__)
 
@@ -39,23 +37,12 @@ class EventViewSet(ModelViewSet):
     queryset = Event.objects.all()
     serializer_class = EventReadSerializer
 
-    # Adding ordering filter to allow clients to order events by start_time
-    filter_backends = [OrderingFilter]
-    ordering = ['start_time']
-
     def get_queryset(self):
-        """
-        Override get_queryset to ensure available_seats is always annotated for both list and retrieve actions.
-        For create/update actions, we return the base queryset without annotation since available_seats is not relevant.
-        """
-        if self.action in ['list', 'retrieve']:
-            # Get date filter from query params
-            date_filter = self.request.query_params.get('date', None)
-            # Annotate the queryset with available seats for both list and retrieve actions
-            return EventService.get_events_with_available_seats(date_filter=date_filter)
-    
+        """create/update/destroy still use this for their own object
+        lookups. list()/retrieve() below bypass this entirely and call
+        the cached EventService methods directly."""
         return self.queryset
-
+    
     def get_serializer_class(self):
         """Use different serializers for read and write operations."""
         if self.action in ['list', 'retrieve']:
@@ -65,40 +52,29 @@ class EventViewSet(ModelViewSet):
     def list(self, request, *args, **kwargs):
         """Override list to implement caching for event listings."""
 
-        # Use the full query string so different filtered/ordered requests do not share one cache entry.
-        query_string = request.META.get("QUERY_STRING", "")
-        cache_key = f"events:list:{query_string or 'default'}"
-        # Check if the event list is already cached
-        cached_data = cache.get(cache_key)
+        data = get_events_list_cached(
+            date_filter=request.query_params.get('date'),
+            start_date=request.query_params.get('start_date'),
+            end_date=request.query_params.get('end_date'),
+            ordering=request.query_params.get('ordering'),
+        )
 
-        if cached_data is not None:
-            return Response(cached_data)
-        
-        response = super().list(request, *args, **kwargs)
-        # Cache the response data for future requests with TTL of 5 minutes
-        cache.set(cache_key, response.data, timeout=300)
-
-        return response
+        return Response(data)
 
     def retrieve(self, request, *args, **kwargs):
         """Override retrieve to implement caching for event details."""
+        
         # Determine the event ID from the URL kwargs using the lookup field or lookup URL kwarg.
         lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
         # Get the event ID from the URL kwargs to use as part of the cache key for caching individual event details.
         event_id = self.kwargs[lookup_url_kwarg]
-        # Retrieve event details with caching to improve performance for frequently accessed events.
-        cache_key = f'event:{event_id}'
-        # Check if the event details are already cached
-        cached_data = cache.get(cache_key)
-
-        if cached_data is not None:
-            return Response(cached_data)
         
-        response = super().retrieve(request, *args, **kwargs)
-        # Cache the response data for future requests with TTL of 5 minutes
-        cache.set(cache_key, response.data, timeout=300)
+        try:
+            data = get_event_detail_cached(event_id)
+        except Event.DoesNotExist:
+            raise NotFound("No Event matches the given query.")
 
-        return response
+        return Response(data)
    
     def perform_create(self, serializer):
         """
@@ -126,7 +102,7 @@ class EventViewSet(ModelViewSet):
             # cache entry could get invalidated for an event that was never
             # really created/changed, or a reader could refill the cache
             # from data that's about to disappear.
-            transaction.on_commit(lambda: BookingService.invalidate_event_cache(event.id))
+            transaction.on_commit(lambda: invalidate_event_cache(event.id))
 
     def perform_update(self, serializer):
         """
@@ -167,7 +143,7 @@ class EventViewSet(ModelViewSet):
             )
 
             # Invalidate cache for the updated event and the event list after updating an event
-            transaction.on_commit(lambda: BookingService.invalidate_event_cache(updated_event.id))
+            transaction.on_commit(lambda: invalidate_event_cache(updated_event.id))
 
     def perform_destroy(self, instance):
         """
@@ -197,7 +173,7 @@ class EventViewSet(ModelViewSet):
                 }
             )
             # Invalidate cache for the deleted event and the event list after deleting an event
-            transaction.on_commit(lambda: BookingService.invalidate_event_cache(event_id))
+            transaction.on_commit(lambda: invalidate_event_cache(event_id))
             
     def get_permissions(self):
         """list/retrieve are public; every write action requires
