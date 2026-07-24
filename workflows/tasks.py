@@ -346,8 +346,28 @@ def handle_booking_confirmation(job):
     msg.attach_alternative(html_content, "text/html")
     msg.send()
 
-    job.is_email_sent = True
-    job.save(update_fields=["is_email_sent"])
+    # msg.send() (an external side effect that already happened) and this
+    # save (the flag that makes this handler idempotent on retry) are two
+    # separate steps with nothing tying them together. Letting a failure
+    # here propagate would make process_workflow_job's except block reset
+    # the job to PENDING and reschedule it — resending a real email that
+    # already went out. Catching it and returning normally instead means
+    # the worst case is a stale is_email_sent flag (logged below, fixable
+    # by hand), never a duplicate send.
+    try:
+        job.is_email_sent = True
+        job.save(update_fields=["is_email_sent"])
+    except Exception:
+        logger.exception(
+            "workflow_confirmation_flag_persist_failed",
+            extra={
+                "event": "workflow_confirmation_flag_persist_failed",
+                "workflow_job_id": job.id,
+                "booking_id": job.booking_id,
+            }
+        )
+        return
+
     logger.info(
         "workflow_confirmation_email_sent",
         extra={

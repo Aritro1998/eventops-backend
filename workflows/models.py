@@ -8,10 +8,21 @@ jobs stuck in PENDING/IN_PROGRESS and re-dispatches them, something a
 bare Celery task with no DB record can't recover from.
 """
 
+from datetime import timedelta
+
 from django.db import models
 from django.db.models import Q
 
 from bookings.models import Booking
+
+# Shared by StuckJobsView (what counts as "stuck" for visibility) and
+# workflows/services.py's requeue_pending_jobs (what actually gets reset
+# and re-dispatched) — a job sitting IN_PROGRESS past this long almost
+# certainly means the worker that claimed it died (OOM kill, restart)
+# before it could finish, since acks_late redelivery of the same message
+# just gets skipped by process_workflow_job's own `status != PENDING`
+# guard rather than actually retried.
+STUCK_IN_PROGRESS_THRESHOLD = timedelta(minutes=5)
 
 
 class WorkflowJob(models.Model):

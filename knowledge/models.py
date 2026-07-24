@@ -15,15 +15,23 @@ class KnowledgeDocument(models.Model):
     GFK's extra indirection (content_type + object_id, no real FK
     constraint) would cost more than it buys here.
 
-    on_delete=CASCADE on both, not SET_NULL: unlike Event.venue/space
-    (which use SET_NULL specifically to protect Event's own booking
-    history from disappearing if its Venue is deleted), a
-    KnowledgeDocument has no standalone value once its subject is gone —
-    a venue's refund policy doc isn't worth keeping as an orphan once
-    that venue no longer exists.
+    venue stays on_delete=CASCADE: a KnowledgeDocument has no standalone
+    value once its subject is gone — a venue's refund policy doc isn't
+    worth keeping as an orphan once that venue no longer exists.
+
+    event is on_delete=SET_NULL rather than CASCADE, specifically because
+    a document can be attached to BOTH a venue and an event at once (see
+    the admin's EventSelect). Deleting the event alone used to cascade
+    the entire row away, destroying venue-relevant content that has
+    independent value (e.g. "Parking & refund policy for Venue X,
+    written for Event Y" would lose its parking/refund info for Venue X
+    entirely, not just its event association). knowledge/signals.py's
+    pre_delete handler on Event still deletes event-only documents (no
+    venue set) to preserve the original "no standalone value" behavior
+    for that case — only the dual-attached case is protected here.
     """
     venue = models.ForeignKey(Venue, null=True, blank=True, on_delete=models.CASCADE, related_name='knowledge_documents')
-    event = models.ForeignKey(Event, null=True, blank=True, on_delete=models.CASCADE, related_name='knowledge_documents')
+    event = models.ForeignKey(Event, null=True, blank=True, on_delete=models.SET_NULL, related_name='knowledge_documents')
     title = models.CharField(max_length=255)
     content = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)

@@ -8,7 +8,7 @@ something regular users or organizers touch.
 
 import logging
 
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, time
 
 from rest_framework import status
 from django.shortcuts import get_object_or_404
@@ -18,7 +18,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 
 from core.pagination import CustomPagination
-from workflows.models import WorkflowJob
+from workflows.models import WorkflowJob, STUCK_IN_PROGRESS_THRESHOLD
 from rest_framework.views import APIView
 from core.permissions import IsRoleAdmin
 from rest_framework.response import Response
@@ -85,7 +85,7 @@ class StuckJobsView(ListAPIView):
     pagination_class = CustomPagination
 
     def get_queryset(self):
-        threshold = timezone.now() - timedelta(minutes=5)
+        threshold = timezone.now() - STUCK_IN_PROGRESS_THRESHOLD
         return WorkflowJob.objects.filter(
             status="IN_PROGRESS",
             started_at__lt=threshold
@@ -119,11 +119,19 @@ class FailedJobsView(ListAPIView):
 
 class RetryJobView(APIView):
     """
-    Reset a failed job back to PENDING so the worker can attempt it again.
-    Clears retry_count/last_error/timestamps back to a fresh-job state
-    rather than just flipping status, so process_workflow_job's own
-    retry-limit logic doesn't immediately re-fail it as already
-    exhausted.
+    Reset a failed (or stuck) job back to PENDING so the worker can
+    attempt it again. Clears retry_count/last_error/timestamps back to a
+    fresh-job state rather than just flipping status, so
+    process_workflow_job's own retry-limit logic doesn't immediately
+    re-fail it as already exhausted.
+
+    Also accepts a job stuck IN_PROGRESS past STUCK_IN_PROGRESS_THRESHOLD
+    (the same jobs StuckJobsView surfaces) — before this, a stuck job was
+    visible to admins but nothing could actually recover it: the
+    automated requeue_pending_jobs only scanned PENDING jobs, and this
+    view only accepted FAILED ones. workflows/services.py's
+    reset_stuck_jobs handles the same recovery automatically on the next
+    beat tick; this is the immediate, manual version of that.
     """
     permission_classes = [IsRoleAdmin]
 
@@ -131,7 +139,13 @@ class RetryJobView(APIView):
 
         job = get_object_or_404(WorkflowJob, id=job_id)
 
-        if job.status != "FAILED":
+        is_stuck_in_progress = (
+            job.status == "IN_PROGRESS"
+            and job.started_at is not None
+            and job.started_at < timezone.now() - STUCK_IN_PROGRESS_THRESHOLD
+        )
+
+        if job.status != "FAILED" and not is_stuck_in_progress:
             logger.warning(
                 "workflow_retry_rejected",
                 extra={
@@ -141,7 +155,7 @@ class RetryJobView(APIView):
                     "requested_by_user_id": request.user.id,
                 }
             )
-            return Response({"error": "Job not in failed state"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Job not in failed or stuck state"}, status=status.HTTP_400_BAD_REQUEST)
 
         job.status = "PENDING"
         job.retry_count = 0

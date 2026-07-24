@@ -497,7 +497,36 @@ class AIAssistantService:
             )
             
             for entry in tool_calls_by_index.values():
-                args = json.loads(entry["arguments"])
+                # entry["arguments"] is streamed text reassembled from many
+                # chunks — a truncated/malformed stream can leave it as
+                # invalid JSON. Unlike _run_tool's own ValueError handling
+                # below, this used to be unguarded and would raise straight
+                # out of this async generator, losing the whole turn instead
+                # of letting the model see the failure and retry.
+                try:
+                    args = json.loads(entry["arguments"])
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "ai_tool_call_args_invalid_json",
+                        extra={
+                            "event": "ai_tool_call_args_invalid_json",
+                            "tool_name": entry["name"],
+                        }
+                    )
+                    if tool_call_log is not None:
+                        tool_call_log.append({"tool": entry["name"], "args": None})
+
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": entry["id"],
+                            "content": json.dumps({
+                                "error": "Arguments were not valid JSON — please retry this tool call."
+                            })
+                        }
+                    )
+                    continue
+
                 tool_result = await self._run_tool(
                     entry["name"],
                     args,
@@ -506,7 +535,7 @@ class AIAssistantService:
                     conversation_id,
                     chat_state
                 )
-                
+
                 if tool_call_log is not None:
                     tool_call_log.append({"tool": entry["name"], "args": args})
 
