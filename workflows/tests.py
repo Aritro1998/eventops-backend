@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from rest_framework.test import APIClient
 
-from bookings.models import Booking
+from bookings.models import Booking, BookingSeat
 from events.models import Event, Seat
 from workflows.models import WorkflowJob
 from workflows.tasks import handle_booking_confirmation, handle_booking_expiry, process_workflow_job
@@ -54,12 +54,16 @@ class TestWorkflow(TestCase):
         self.booking = Booking.objects.create(
             user=self.normal_user,
             event=self.event,
-            seat=self.seat,
             status="PENDING",
             amount=self.event.price,
             idempotency_key=str(uuid.uuid4()),
             expires_at=timezone.now() + timedelta(minutes=10),
             retry_count=0,
+        )
+
+        BookingSeat.objects.create(
+            booking=self.booking,
+            seat=self.seat,
         )
 
     def test_failed_jobs_view_returns_only_failed_jobs(self):
@@ -79,6 +83,7 @@ class TestWorkflow(TestCase):
         response = self.client.get("/api/workflows/failed-jobs/")
 
         self.assertEqual(response.status_code, 200)
+        print(response.data)
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(len(response.data["results"]), 1)
         self.assertEqual(response.data["results"][0]["id"], failed_job.id)
@@ -237,7 +242,7 @@ class TestWorkflow(TestCase):
                 "email": self.normal_user.email,
                 "booking_id": self.booking.id,
                 "event_name": self.event.name,
-                "seat_number": self.seat.seat_number,
+                "seat_numbers": [self.seat.seat_number],
                 "event_time": str(self.event.start_time),
             },
         )

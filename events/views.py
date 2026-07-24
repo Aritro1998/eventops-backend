@@ -1,19 +1,17 @@
 import logging
 
-from django.db.models import Max
 from django.db import transaction
-from django.core.cache import cache
-from rest_framework import serializers
-from django.db.models import Count, Q, F
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.viewsets import ModelViewSet
-from rest_framework.filters import OrderingFilter
+from rest_framework.exceptions import ValidationError, NotFound
+from django.core.exceptions import ValidationError as DjangoValidationError
 
-from .models import Event, Seat
-from bookings.models import Booking
+from .models import Event
+from .services import EventService
 from core.permissions import IsAdminOrOrganizer
 from .serializers import EventReadSerializer, EventWriteSerializer
+from .caching import get_events_list_cached, get_event_detail_cached, invalidate_event_cache
 
 logger = logging.getLogger(__name__)
 
@@ -39,75 +37,10 @@ class EventViewSet(ModelViewSet):
     queryset = Event.objects.all()
     serializer_class = EventReadSerializer
 
-    # Adding ordering filter to allow clients to order events by start_time
-    filter_backends = [OrderingFilter]
-    ordering = ['start_time']
-
-    def invalidate_event_cache(self, event_id):
-        """
-        Invalidate cache for a specific event and the event list when an event is updated or deleted.
-        """
-        cache.delete(f"event:{event_id}")
-        cache.delete_pattern("events:list:*")
-        logger.info(
-            "event_cache_invalidated",
-            extra={
-                "event": "event_cache_invalidated",
-                "event_id": event_id,
-            }
-        )
-
-    def list(self, request, *args, **kwargs):
-        """Override list to implement caching for event listings."""
-        # Use the full query string so different filtered/ordered requests do not share one cache entry.
-        query_string = request.META.get("QUERY_STRING", "")
-        cache_key = f"events:list:{query_string or 'default'}"
-        # Check if the event list is already cached
-        cached_data = cache.get(cache_key)
-
-        if cached_data is not None:
-            return Response(cached_data)
-        
-        response = super().list(request, *args, **kwargs)
-        # Cache the response data for future requests with TTL of 5 minutes
-        cache.set(cache_key, response.data, timeout=300)
-
-        return response
-
-    def retrieve(self, request, *args, **kwargs):
-        """Override retrieve to implement caching for event details."""
-        # Determine the event ID from the URL kwargs using the lookup field or lookup URL kwarg.
-        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
-        # Get the event ID from the URL kwargs to use as part of the cache key for caching individual event details.
-        event_id = self.kwargs[lookup_url_kwarg]
-        # Retrieve event details with caching to improve performance for frequently accessed events.
-        cache_key = f'event:{event_id}'
-        # Check if the event details are already cached
-        cached_data = cache.get(cache_key)
-
-        if cached_data is not None:
-            return Response(cached_data)
-        
-        response = super().retrieve(request, *args, **kwargs)
-        # Cache the response data for future requests with TTL of 5 minutes
-        cache.set(cache_key, response.data, timeout=300)
-
-        return response
-
     def get_queryset(self):
-        """
-        Override get_queryset to ensure available_seats is always annotated for both list and retrieve actions.
-        For create/update actions, we return the base queryset without annotation since available_seats is not relevant.
-        """
-        if self.action in ['list', 'retrieve']:
-            # Annotate the queryset with available seats for both list and retrieve actions
-            return self.queryset.annotate(
-                confirmed_bookings=Count(
-                    'bookings',
-                    filter=Q(bookings__status='CONFIRMED')
-                ),
-                available_seats=F('total_seats') - F('confirmed_bookings')
-            )
+        """create/update/destroy still use this for their own object
+        lookups. list()/retrieve() below bypass this entirely and call
+        the cached EventService methods directly."""
         return self.queryset
     
     def get_serializer_class(self):
@@ -116,19 +49,42 @@ class EventViewSet(ModelViewSet):
             return self.serializer_class
         return EventWriteSerializer
     
+    def list(self, request, *args, **kwargs):
+        """Override list to implement caching for event listings."""
+
+        data = get_events_list_cached(
+            date_filter=request.query_params.get('date'),
+            start_date=request.query_params.get('start_date'),
+            end_date=request.query_params.get('end_date'),
+            ordering=request.query_params.get('ordering'),
+        )
+
+        return Response(data)
+
+    def retrieve(self, request, *args, **kwargs):
+        """Override retrieve to implement caching for event details."""
+        
+        # Determine the event ID from the URL kwargs using the lookup field or lookup URL kwarg.
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        # Get the event ID from the URL kwargs to use as part of the cache key for caching individual event details.
+        event_id = self.kwargs[lookup_url_kwarg]
+        
+        try:
+            data = get_event_detail_cached(event_id)
+        except Event.DoesNotExist:
+            raise NotFound("No Event matches the given query.")
+
+        return Response(data)
+   
     def perform_create(self, serializer):
         """
         Override to set the created_by field to the current user on event creation.
-        After saving the event, we also create the corresponding seats based on total_seats.
+        Seat generation (space-aware or plain sequential) is delegated to
+        EventService, the same logic the admin panel uses.
         """
         with transaction.atomic():
             event = serializer.save(created_by=self.request.user)
-
-            # After creating the event, create the corresponding seats based on total_seats
-            Seat.objects.bulk_create([
-                Seat(event=event, seat_number=i) 
-                for i in range(1, event.total_seats + 1)
-            ])
+            EventService.sync_seats_on_create(event)
 
             logger.info(
                 "event_created",
@@ -140,110 +96,40 @@ class EventViewSet(ModelViewSet):
                 }
             )
 
-            # Invalidate cache for the event list after creating a new event
-            transaction.on_commit(lambda: self.invalidate_event_cache(event.id))
+            # transaction.on_commit (not a direct call) so the cache is only
+            # invalidated after the DB transaction actually commits — if it
+            # ran immediately and the transaction later rolled back, a stale
+            # cache entry could get invalidated for an event that was never
+            # really created/changed, or a reader could refill the cache
+            # from data that's about to disappear.
+            transaction.on_commit(lambda: invalidate_event_cache(event.id))
 
     def perform_update(self, serializer):
+        """
+        Safety validation (space/venue consistency, seat-reduction guards)
+        already ran in EventWriteSerializer.validate() via Event.clean().
+        This only saves the event and delegates seat synchronization to
+        EventService, the same logic the admin panel uses.
+
+        EventService.sync_seats_on_update can still raise a fresh
+        DjangoValidationError even after clean() already passed — that
+        check ran before this transaction's row lock was acquired, so a
+        concurrent booking could have slipped in during the gap. Converting
+        it here keeps the API response a clean 400 instead of an unhandled
+        500 in that rare race case.
+        """
         # We lock the event row so seat-count changes and seat table updates happen together.
         with transaction.atomic():
-            event = Event.objects.select_for_update().get(id=self.get_object().id)
-
-            # Get current total_seats before update
+            event = Event.objects.select_for_update().get(pk=serializer.instance.pk)
             old_total_seats = event.total_seats
+            old_space_id = event.space_id
+            serializer.instance = event
 
-            # Update the event with new data
-            new_total_seats = serializer.validated_data.get('total_seats', old_total_seats)
-
-            # Get the count of currently booked seats for the event
-            max_booked_seat = event.bookings.filter(
-                status='CONFIRMED'
-            ).aggregate(
-                max_seat_number=Max('seat__seat_number')
-            )['max_seat_number'] or 0
-
-
-            # Validate that the new total_seats is not less than the number of already booked seats
-            if new_total_seats < max_booked_seat:
-                # Validate that the new total_seats is not less than the number of already booked seats
-                logger.warning(
-                    "event_seat_reduction_blocked",
-                    extra={
-                        "event": "event_seat_reduction_blocked",
-                        "event_id": event.id,
-                        "requested_total_seats": new_total_seats,
-                        "max_booked_seat": max_booked_seat,
-                    }
-                )
-                raise serializers.ValidationError(
-                    f"Cannot reduce total seats below the highest booked seat number ({max_booked_seat})"
-                )
-            elif new_total_seats == old_total_seats:
-                # If total_seats is unchanged, we can simply save the event without modifying seats
-                updated_event = serializer.save()
-                logger.info(
-                    "event_updated",
-                    extra={
-                        "event": "event_updated",
-                        "event_id": updated_event.id,
-                        "updated_by_user_id": self.request.user.id,
-                        "old_total_seats": old_total_seats,
-                        "new_total_seats": updated_event.total_seats,
-                    }
-                )
-                transaction.on_commit(lambda: self.invalidate_event_cache(updated_event.id))
-                return
-
-            # Save after validation
             updated_event = serializer.save()
-
-            # Adjust seats based on the new total_seats value
-            if updated_event.total_seats > old_total_seats:
-                # If total_seats has increased, just add new seats
-                Seat.objects.bulk_create([
-                    Seat(event=updated_event, seat_number=i) 
-                    for i in range(old_total_seats + 1, updated_event.total_seats + 1)
-                ])
-            elif updated_event.total_seats < old_total_seats:
-                # Lock the seats being considered for removal too, not just the
-                # event row above. create_booking() locks a Seat row, not the
-                # Event row, so without this a concurrent booking on one of
-                # these seats could commit in the gap between this check and
-                # the delete below and get silently deleted along with its
-                # seat and payment.
-                seat_ids_to_remove = list(
-                    Seat.objects.select_for_update().filter(
-                        event=updated_event,
-                        seat_number__gt=updated_event.total_seats
-                    ).values_list('id', flat=True)
-                )
-
-                # Block the reduction if ANY booking — active or historical —
-                # still references one of these seats. Deleting a Seat cascades
-                # to delete its Booking (and that Booking's Payment via
-                # Payment.booking's own CASCADE), so a seat that was ever
-                # booked, even by a long-cancelled or expired booking, must
-                # never be deleted or that booking/payment history is
-                # silently destroyed with it.
-                has_any_booking = Booking.objects.filter(
-                    seat_id__in=seat_ids_to_remove
-                ).exists()
-
-                if has_any_booking:
-                    logger.warning(
-                        "event_seat_history_reduction_blocked",
-                        extra={
-                            "event": "event_seat_history_reduction_blocked",
-                            "event_id": updated_event.id,
-                            "requested_total_seats": updated_event.total_seats,
-                        }
-                    )
-                    raise serializers.ValidationError(
-                        "Cannot reduce total seats because some higher-numbered seats have booking history (active or past)."
-                    )
-
-                # Safe to remove: proven above that no booking, of any status,
-                # references any of these seats.
-                Seat.objects.filter(id__in=seat_ids_to_remove).delete()
+            try:
+                EventService.sync_seats_on_update(updated_event, old_total_seats, old_space_id)
+            except DjangoValidationError as e:
+                raise ValidationError(e.messages if hasattr(e, 'messages') else str(e))
 
             logger.info(
                 "event_updated",
@@ -257,9 +143,24 @@ class EventViewSet(ModelViewSet):
             )
 
             # Invalidate cache for the updated event and the event list after updating an event
-            transaction.on_commit(lambda: self.invalidate_event_cache(updated_event.id))
+            transaction.on_commit(lambda: invalidate_event_cache(updated_event.id))
 
     def perform_destroy(self, instance):
+        """
+        Seat.event and Booking.event are both on_delete=CASCADE, but
+        BookingSeat.seat is on_delete=PROTECT — Django refuses to delete
+        an Event that has ANY booking at all, cascade or not, active or
+        not. Checking has_booking_history() first turns that into a clean
+        400 instead of letting Django's ProtectedError surface as an
+        unhandled 500. There's no "delete anyway" path: an event with
+        booking history should be archived (see EventService.archive_event
+        / Event.is_archived), never actually deleted.
+        """
+        if EventService.has_booking_history(instance):
+            raise ValidationError(
+                "This event has booking history and cannot be deleted. Archive it instead."
+            )
+
         with transaction.atomic():
             event_id = instance.id
             super().perform_destroy(instance)
@@ -272,9 +173,12 @@ class EventViewSet(ModelViewSet):
                 }
             )
             # Invalidate cache for the deleted event and the event list after deleting an event
-            transaction.on_commit(lambda: self.invalidate_event_cache(event_id))
+            transaction.on_commit(lambda: invalidate_event_cache(event_id))
             
     def get_permissions(self):
+        """list/retrieve are public; every write action requires
+        IsAdminOrOrganizer (see core/permissions.py) — admins can touch
+        any event, organizers only their own."""
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             # Only authenticated users can create, update, or delete events
             return [IsAdminOrOrganizer()]

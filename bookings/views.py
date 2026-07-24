@@ -1,16 +1,23 @@
+"""
+Booking HTTP endpoints. Every view here is intentionally thin — all the
+actual locking/idempotency/validation logic lives in BookingService, these
+views just translate HTTP <-> service calls and turn ValueErrors into
+400 responses.
+"""
+
 import logging
 
 from rest_framework import status
+from django.http import Http404
+from django.db import OperationalError
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.shortcuts import get_object_or_404
 
-from .models import Booking
 from .services import BookingService
-from core.throttles import BookingThrottle, DefaultThrottle
 from core.pagination import CustomPagination
 from payments.services import PaymentService
+from core.throttles import BookingThrottle, DefaultThrottle
 from .serializers import BookingWriteSerializer, BookingReadSerializer
 
 logger = logging.getLogger(__name__)
@@ -51,85 +58,48 @@ class BookingListView(APIView):
         4. Trigger payment workflow
         5. Return final booking state
         """
-
+        
         user = request.user
-        key = request.data.get("idempotency_key")
-
-        def respond_existing(booking):
-            return Response(
-                BookingReadSerializer(booking).data,
-                status=status.HTTP_200_OK
+        
+        try:
+            # Validate request data
+            serializer = BookingWriteSerializer(
+                data=request.data,
+                context={"request": request}
             )
+            serializer.is_valid(raise_exception=True)
 
-        # 1. Fast idempotency check (no locking)
-        if key:
-            existing = BookingService.get_existing_booking(user, key)
-            if existing:
-                logger.info(
-                    "booking_idempotency_hit",
-                    extra={
-                        "event": "booking_idempotency_hit",
-                        "user_id": user.id,
-                        "booking_id": existing.id,
-                    }
-                )
-                return respond_existing(existing)
-
-        # 2. Validate request data
-        serializer = BookingWriteSerializer(
-            data=request.data,
-            context={"request": request}
-        )
-        serializer.is_valid(raise_exception=True)
-
-        # 3. Delegate to service layer
-        booking, seat_unavailable, is_existing = BookingService.create_booking(
-            user=user,
-            validated_data=serializer.validated_data,
-            key=key
-        )
-
-        # Handle seat conflict
-        if seat_unavailable:
+            booking, is_existing = BookingService.create_booking_for_user(
+                user=request.user,
+                event=serializer.validated_data["event"],
+                seat_ids=[seat.id for seat in serializer.validated_data["seats"]],
+                idempotency_key=request.data.get("idempotency_key")
+            )
+        except OperationalError:
+            # Surfaces as a clean 503 rather than an unhandled 500 when the
+            # row lock in BookingService.create_booking can't be acquired
+            # (e.g. heavy concurrent demand for the same seat) — the client
+            # is told to retry rather than seeing a generic server error.
             logger.warning(
-                "booking_seat_unavailable",
+                "booking_create_database_contention",
                 extra={
-                    "event": "booking_seat_unavailable",
+                    "event": "booking_create_database_contention",
                     "user_id": user.id,
-                    "event_id": serializer.validated_data["event"].id,
-                    "seat_id": serializer.validated_data["seat"].id,
                 }
             )
             return Response(
-                {"detail": "Seat already booked"},
+                {"detail": "Booking could not be completed right now. Please retry."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        except ValueError as e:
+            return Response(
+                {"detail": str(e)},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Idempotent retry
-        if is_existing:
-            logger.info(
-                "booking_idempotency_recovered",
-                extra={
-                    "event": "booking_idempotency_recovered",
-                    "user_id": user.id,
-                    "booking_id": booking.id,
-                }
-            )
-            return respond_existing(booking)
-
-        # 4. Trigger payment workflow (outside transaction)
-        if booking.status == "PENDING":
-            PaymentService.process_payment(booking.id)
-
-        # Fetch optimized object (avoids N+1)
-        booking = Booking.objects.select_related(
-            "event", "seat", "payment"
-        ).get(id=booking.id)
-
-        # 5. Return response
         return Response(
             BookingReadSerializer(booking).data,
-            status=status.HTTP_201_CREATED
+            status=status.HTTP_200_OK if is_existing else status.HTTP_201_CREATED
         )
 
     def get(self, request):
@@ -141,24 +111,20 @@ class BookingListView(APIView):
         - Pagination
         - Query optimization (select_related)
         """
-
-        bookings = Booking.objects.filter(user=request.user)
-
-        valid_statuses = [choice[0] for choice in Booking.STATUS_CHOICES]
-
-        #  Optional filtering
+        
         status_param = request.query_params.get("status")
-        if status_param:
-            if status_param not in valid_statuses:
-                return Response(
-                    {"detail": f"Invalid status filter. Valid options: {valid_statuses}"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            bookings = bookings.filter(status=status_param)
-
-        #  Avoid N+1 queries
-        bookings = bookings.select_related("event", "seat", "payment").order_by("-created_at")
-
+        
+        try:
+            bookings = BookingService.get_user_bookings(
+                user=request.user, 
+                status_filter=status_param
+            )
+        except ValueError as e:
+            return Response(
+                {"detail": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
         #  Pagination
         paginator = CustomPagination()
         paginated = paginator.paginate_queryset(bookings, request)
@@ -179,11 +145,9 @@ class BookingDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, booking_id):
-        booking = get_object_or_404(
-            Booking.objects.select_related("event", "seat", "payment"),
-            id=booking_id,
-            user=request.user
-        )
+        booking = BookingService.get_booking_for_user(booking_id, request.user)
+        if booking is None:
+            raise Http404
 
         serializer = BookingReadSerializer(booking)
         return Response(serializer.data)
@@ -202,11 +166,9 @@ class BookingCancelView(APIView):
 
     def post(self, request, booking_id):
 
-        booking = get_object_or_404(
-            Booking.objects.select_related("event", "seat", "payment"),
-            id=booking_id,
-            user=request.user
-        )
+        booking = BookingService.get_booking_for_user(booking_id, request.user)
+        if booking is None:
+            raise Http404
 
         try:
             booking = BookingService.cancel_booking(booking)
@@ -244,11 +206,9 @@ class BookingRetryPaymentView(APIView):
 
     def post(self, request, booking_id):
 
-        booking = get_object_or_404(
-            Booking.objects.select_related("event", "seat", "payment"),
-            id=booking_id,
-            user=request.user
-        )
+        booking = BookingService.get_booking_for_user(booking_id, request.user)
+        if booking is None:
+            raise Http404
 
         # Validate booking status
         if booking.status not in ["FAILED", "PENDING"]:
@@ -267,7 +227,7 @@ class BookingRetryPaymentView(APIView):
             )
 
         try:
-            payment = PaymentService.process_payment(booking.id)
+            PaymentService.process_payment(booking.id)
         except ValueError as e:
             return Response(
                 {"detail": str(e)},

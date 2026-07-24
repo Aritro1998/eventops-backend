@@ -1,7 +1,7 @@
 services:
 
   db:
-    image: postgres:15
+    image: pgvector/pgvector:pg15
     container_name: eventops_db
     restart: always
     environment:
@@ -32,10 +32,26 @@ services:
       - db
       - redis
 
+  gradio:
+    build: .
+    container_name: eventops_gradio
+    command: python gradio_app.py
+    volumes:
+      - .:/app
+    ports:
+      - "7860:7860"
+    depends_on:
+      - web
+
   celery:
     build: .
     container_name: eventops_celery
-    command: celery -A core.celery worker -l info
+    # Concurrency defaults to the host's CPU count (10 here) with no cap,
+    # meaning 10 full worker child processes - each a complete copy of the
+    # loaded Django app - for a dev setup that never runs that much
+    # concurrent task load. 2 is plenty for local booking-expiry checks
+    # and embedding generation without wasting memory on idle workers.
+    command: celery -A core.celery worker -l info --concurrency=2
     env_file:
       - .env
     volumes:

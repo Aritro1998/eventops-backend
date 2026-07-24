@@ -1,13 +1,26 @@
+"""
+Celery task definitions. process_workflow_job is the actual worker for
+WorkflowJob rows (dispatches by job_type to the handle_* functions at the
+bottom of this file); the four *_task functions below it are what
+CELERY_BEAT_SCHEDULE (core/settings/base.py) fires every 5 minutes —
+requeue_pending_jobs_task recovers stuck WorkflowJobs, the three
+cleanup_expired_* tasks garbage-collect the AI assistant's PendingBooking/
+PendingBookingCancellation/PendingPaymentRetry rows that nobody confirmed
+in time.
+"""
+
 import logging
 
 from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
-from bookings.models import Booking
-from workflows.models import WorkflowJob
 from django.core.mail import EmailMultiAlternatives
 
 from django.conf import settings
+from bookings.models import Booking
+from workflows.models import WorkflowJob
+from knowledge.models import KnowledgeDocument
+from knowledge.services import KnowledgeService
 from workflows.services import requeue_pending_jobs
 
 logger = logging.getLogger(__name__)
@@ -59,6 +72,8 @@ def process_workflow_job(self, job_id):
             handle_booking_confirmation(job)
         elif job.job_type.strip().upper() == "BOOKING_EXPIRY":
             handle_booking_expiry(job)
+        elif job.job_type.strip().upper() == "KNOWLEDGE_CHUNKING":
+            handle_knowledge_chunking(job)
         else:
             raise ValueError(f"Unknown job type: {job.job_type}")
 
@@ -143,6 +158,79 @@ def requeue_pending_jobs_task():
     requeue_pending_jobs()
 
 
+@shared_task
+def cleanup_expired_pending_bookings_task():
+    """
+    Delete expired AI assistant pending booking drafts.
+    These are not real bookings and do not reserve seats.
+    """
+    from ai_assistant.models import PendingBooking
+    
+    deleted_count, _ = PendingBooking.objects.filter(
+        expires_at__lte=timezone.now()
+    ).delete()
+    
+    logger.info(
+        "expired_pending_bookings_cleaned",
+        extra={
+            "event": "expired_pending_bookings_cleaned",
+            "deleted_count": deleted_count,
+        }
+    )
+    
+    return deleted_count
+
+
+@shared_task
+def  cleanup_expired_pending_cancellations_task():
+    """
+    Delete expired AI assistant staged cancellations.
+    The underlying booking is untouched — only the staged confirmation expires.
+    """
+    from ai_assistant.models import PendingBookingCancellation
+    
+    deleted_count, _ = (
+        PendingBookingCancellation.objects
+        .filter(expires_at__lte=timezone.now())
+        .delete()
+    )
+    
+    logger.info(
+        "expired_pending_cancellations_cleaned",
+        extra={
+            "event": "expired_pending_cancellations_cleaned",
+            "deleted_count": deleted_count,
+        }
+    )
+    
+    return deleted_count
+
+
+@shared_task
+def cleanup_expired_pending_payment_retries_task():
+    """
+    Delete expired AI assistant staged payment retries.
+    The underlying booking is untouched — only the staged retry expires.
+    """
+    from ai_assistant.models import PendingPaymentRetry
+    
+    deleted_count, _ = (
+        PendingPaymentRetry.objects
+        .filter(expires_at__lte=timezone.now())
+        .delete()
+    )
+    
+    logger.info(
+        "expired_pending_payment_retries_cleaned",
+        extra={
+            "event": "expired_pending_payment_retries_cleaned",
+            "deleted_count": deleted_count,
+        }
+    )
+    
+    return deleted_count
+
+
 def handle_booking_confirmation(job):
     """
     Handle email sending for booking confirmation.
@@ -156,39 +244,69 @@ def handle_booking_confirmation(job):
     email = job.payload.get("email")
     booking_id = job.payload.get("booking_id")
     event_name = job.payload.get("event_name", "Event")
-    seat_number = job.payload.get("seat_number", "N/A")
     event_time = job.payload.get("event_time", "TBD")
+
+    # is_general_admission/seat_labels/seat_count come from
+    # Booking.seat_display() (see bookings/signals.py) — general
+    # admission bookings have no individual seat identity to show, only
+    # a ticket count. Defaults here cover any already-queued job from
+    # before this payload shape existed.
+    is_general_admission = job.payload.get("is_general_admission", False)
+    seat_labels = job.payload.get("seat_labels", [])
+    seat_count = job.payload.get("seat_count", len(seat_labels))
+    seat_summary = f"{seat_count} ticket(s)" if is_general_admission else ", ".join(seat_labels)
+    seat_row_label = "Tickets" if is_general_admission else "Seat"
+
+    # Both absent (older queued jobs from before this payload shape existed)
+    # or an event with no venue/space at all — either way, nothing to show.
+    venue_name = job.payload.get("venue_name")
+    space_name = job.payload.get("space_name")
 
     if not email:
         raise ValueError("Email not found in payload")
 
     subject = f"Booking Confirmed - {event_name}"
 
-    text_content = f"""
-    Your booking is confirmed.
+    text_lines = [f"Event: {event_name}"]
+    if venue_name:
+        text_lines.append(f"Venue: {venue_name}")
+    if space_name:
+        text_lines.append(f"Space: {space_name}")
+    text_lines += [
+        f"{seat_row_label}: {seat_summary}",
+        f"Time: {event_time}",
+        f"Booking ID: {booking_id}",
+    ]
 
-    Event: {event_name}
-    Seat: {seat_number}
-    Time: {event_time}
-    Booking ID: {booking_id}
-    """
+    text_content = "Your booking is confirmed.\n\n" + "\n".join(text_lines)
+
+    venue_html_row = f"""
+                    <tr>
+                        <td style="padding: 8px; font-weight: bold;">Venue</td>
+                        <td style="padding: 8px;">{venue_name}</td>
+                    </tr>""" if venue_name else ""
+    space_html_row = f"""
+                    <tr>
+                        <td style="padding: 8px; font-weight: bold;">Space</td>
+                        <td style="padding: 8px;">{space_name}</td>
+                    </tr>""" if space_name else ""
 
     html_content = f"""
     <html>
         <body style="font-family: Arial, sans-serif; background-color: #f6f6f6; padding: 20px;">
             <div style="max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 8px;">
                 <h2 style="color: #333;">Booking Confirmed</h2>
-                
+
                 <p>Your booking has been successfully confirmed.</p>
 
                 <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
                     <tr>
                         <td style="padding: 8px; font-weight: bold;">Event</td>
                         <td style="padding: 8px;">{event_name}</td>
-                    </tr>
+                    </tr>{venue_html_row}{space_html_row}
                     <tr>
-                        <td style="padding: 8px; font-weight: bold;">Seat</td>
-                        <td style="padding: 8px;">{seat_number}</td>
+                        <td style="padding: 8px; font-weight: bold;">{seat_row_label}</td>
+                        <td style="padding: 8px;">{seat_summary}</td>
                     </tr>
                     <tr>
                         <td style="padding: 8px; font-weight: bold;">Time</td>
@@ -228,8 +346,28 @@ def handle_booking_confirmation(job):
     msg.attach_alternative(html_content, "text/html")
     msg.send()
 
-    job.is_email_sent = True
-    job.save(update_fields=["is_email_sent"])
+    # msg.send() (an external side effect that already happened) and this
+    # save (the flag that makes this handler idempotent on retry) are two
+    # separate steps with nothing tying them together. Letting a failure
+    # here propagate would make process_workflow_job's except block reset
+    # the job to PENDING and reschedule it — resending a real email that
+    # already went out. Catching it and returning normally instead means
+    # the worst case is a stale is_email_sent flag (logged below, fixable
+    # by hand), never a duplicate send.
+    try:
+        job.is_email_sent = True
+        job.save(update_fields=["is_email_sent"])
+    except Exception:
+        logger.exception(
+            "workflow_confirmation_flag_persist_failed",
+            extra={
+                "event": "workflow_confirmation_flag_persist_failed",
+                "workflow_job_id": job.id,
+                "booking_id": job.booking_id,
+            }
+        )
+        return
+
     logger.info(
         "workflow_confirmation_email_sent",
         extra={
@@ -261,12 +399,30 @@ def handle_booking_expiry(job):
 
         booking.status = "EXPIRED"
         booking.save(update_fields=["status", "updated_at"])
+        # unique_seat_claim only enforces uniqueness while is_active=True, so
+        # an expired booking releases its seats by flipping this flag rather
+        # than deleting the rows. release_seats() itself broadcasts the live
+        # update and invalidates the event cache now, so nothing further is
+        # needed here.
+        booking.release_seats()
+
         logger.info(
             "booking_expired",
             extra={
                 "event": "booking_expired",
                 "booking_id": booking.id,
                 "event_id": booking.event_id,
-                "seat_id": booking.seat_id,
+                "seat_ids": [bs.seat_id for bs in booking.booking_seats.all()],
             }
         )
+        
+        
+def handle_knowledge_chunking(job):
+    """
+    Re-chunk and re-embed a KnowledgeDocument. Idempotent — sync_chunks
+    replaces existing chunks each time, so a retried/duplicate job is safe.
+    """
+    document_id = job.payload.get("document_id")
+    document = KnowledgeDocument.objects.get(id=document_id)
+    KnowledgeService.sync_chunks(document)
+    

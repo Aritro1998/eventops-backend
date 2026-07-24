@@ -7,7 +7,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from payments.models import Payment
-from bookings.models import Booking
+from bookings.models import Booking, BookingSeat
 from events.models import Event, Seat
 from payments.services import PaymentService
 
@@ -43,12 +43,16 @@ class TestPayment(TestCase):
         self.booking = Booking.objects.create(
             event=self.event,
             user=self.user,
-            seat=self.seat,
             status="PENDING",
             amount=self.event.price,
             idempotency_key=str(uuid.uuid4()),
             expires_at=timezone.now() + timedelta(minutes=10),
             retry_count=0
+        )
+
+        BookingSeat.objects.create(
+            booking=self.booking,
+            seat=self.seat
         )
 
     # -------------------------

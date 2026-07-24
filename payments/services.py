@@ -3,36 +3,49 @@ import random
 import uuid
 from django.utils import timezone
 from django.db import transaction
-from django.core.cache import cache
 
 from .models import Payment
 from bookings.models import Booking
+from events.caching import invalidate_event_cache
+from events.broadcasts import broadcast_seats_update_for_booking
 
 logger = logging.getLogger(__name__)
 
 class PaymentService:
+    """Simulated payment processing — see the module docstring in
+    payments/models.py for why. process_payment is the single entry point
+    used by both a fresh booking (BookingService.create_booking_for_user)
+    and a manual retry (the AI assistant's payment-retry flow, or
+    BookingRetryPaymentView)."""
 
-    @staticmethod
-    def invalidate_event_cache(event_id):
-        """Invalidate caches related to the event."""
-        cache.delete(f"event:{event_id}")
-        cache.delete_pattern("events:list:*")
-        logger.info(
-            "event_cache_invalidated",
-            extra={
-                "event": "event_cache_invalidated",
-                "event_id": event_id,
-                "source": "payment_service",
-            }
-        )
+    MAX_RETRIES = 3
 
     @staticmethod
     def process_payment(booking_id):
+        """
+        Attempt (or re-attempt) payment for a booking. Coin-flip success/
+        failure since there's no real gateway (see class docstring).
 
+        State machine, in order of precedence:
+        1. Booking already expired, or already hit MAX_RETRIES -> booking
+           becomes EXPIRED, seats released, raises ValueError. No payment
+           attempt happens at all.
+        2. Booking already CONFIRMED -> idempotent no-op, returns the
+           existing successful Payment without touching anything.
+        3. Otherwise, attempt payment:
+           - success -> Payment SUCCESS, Booking CONFIRMED.
+           - failure -> retry_count += 1; Booking becomes EXPIRED if that
+             was the last allowed retry (or the hold already expired),
+             otherwise FAILED (still retriable by calling this again).
+
+        The whole thing runs under a row lock on the Booking (and, once
+        created, the Payment) so two retry-payment clicks racing each
+        other can't both succeed or both increment retry_count past the
+        limit.
+        """
         # success = random.choice([True] * 9 + [False])
         success = random.choice([True, False])
         error_message = None
-        event_id_to_invalidate = None
 
         with transaction.atomic():
 
@@ -52,9 +65,16 @@ class PaymentService:
             now = timezone.now()
 
             # Expiry check (normalize early)
-            if booking.expires_at < now:
+            if booking.expires_at and booking.expires_at < now:
                 booking.status = "EXPIRED"
                 booking.save(update_fields=["status", "updated_at"])
+                # unique_seat_claim only enforces uniqueness while
+                # is_active=True, so an expired booking releases its seats by
+                # flipping this flag rather than deleting the rows.
+                # release_seats() itself broadcasts the live update and
+                # invalidates the event cache now, so nothing further is
+                # needed here.
+                booking.release_seats()
                 error_message = "Booking has expired"
                 logger.warning(
                     "payment_booking_expired",
@@ -66,9 +86,10 @@ class PaymentService:
                 )
 
             # Retry limit check
-            elif booking.retry_count >= 3:
+            elif booking.retry_count >= PaymentService.MAX_RETRIES:
                 booking.status = "EXPIRED"
                 booking.save(update_fields=["status", "updated_at"])
+                booking.release_seats()
                 error_message = "Retry limit exceeded"
                 logger.warning(
                     "payment_retry_limit_exceeded",
@@ -121,7 +142,18 @@ class PaymentService:
                     payment.status = "SUCCESS"
                     payment.transaction_id = str(uuid.uuid4())
                     booking.status = "CONFIRMED"
-                    event_id_to_invalidate = booking.event_id
+
+                    transaction.on_commit(
+                        lambda: broadcast_seats_update_for_booking(booking, "booked")
+                    )
+                    # Payment success doesn't go through release_seats() -
+                    # the seats are being confirmed, not released - so this
+                    # is the one remaining case that still needs its own
+                    # explicit cache invalidation.
+                    transaction.on_commit(
+                        lambda: invalidate_event_cache(booking.event_id)
+                    )
+
                     logger.info(
                         "payment_succeeded",
                         extra={
@@ -136,8 +168,10 @@ class PaymentService:
                     booking.retry_count += 1
                     payment.status = "FAILED"
 
-                    # Decide next state
-                    if booking.retry_count >= 3 or booking.expires_at < now:
+                    # Decide next state - if this becomes EXPIRED,
+                    # release_seats() below (once booking.status is saved)
+                    # handles the broadcast and cache invalidation itself.
+                    if booking.retry_count >= PaymentService.MAX_RETRIES or (booking.expires_at and booking.expires_at < now):
                         booking.status = "EXPIRED"
                     else:
                         booking.status = "FAILED"
@@ -156,11 +190,9 @@ class PaymentService:
                 payment.save(update_fields=["status", "transaction_id", "updated_at"])
                 booking.save(update_fields=["status", "retry_count", "updated_at"])
 
-                if event_id_to_invalidate is not None:   # ADDED
-                    transaction.on_commit(
-                        lambda: PaymentService.invalidate_event_cache(event_id_to_invalidate)
-                    )
-                    
+                if booking.status == "EXPIRED":
+                    booking.release_seats()
+
         if error_message:
             raise ValueError(error_message)
 

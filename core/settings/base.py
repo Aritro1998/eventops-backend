@@ -1,3 +1,15 @@
+"""
+Settings shared by every environment.
+
+This project splits settings into base.py (this file) + one file per
+environment (dev.py, prod.py) that does `from .base import *` and then
+overrides only what differs — database engine, DEBUG, allowed hosts, etc.
+`core/settings/__init__.py` decides which environment file is actually
+loaded. Put anything that should be identical everywhere here; put
+environment-specific values (like dev.py's SQLite fallback) in the
+environment file instead.
+"""
+
 import os
 from datetime import timedelta
 from pathlib import Path
@@ -7,6 +19,8 @@ from celery.schedules import crontab
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
+# Falls back to a hardcoded dev-only value so the project runs out of the
+# box without a .env file. Always set SECRET_KEY explicitly in production.
 SECRET_KEY = os.getenv(
     "SECRET_KEY",
     "django-insecure-l(zh$)@+c&r8+#d-_dkcnrx0l@5(&8^-6zm_l*8j11y&*otlnw",
@@ -14,7 +28,18 @@ SECRET_KEY = os.getenv(
 
 ALLOWED_HOSTS = ["*"]
 
+# Every Django app in this project. Order mostly doesn't matter, except
+# that an app must appear before anything that references its models in
+# a migration dependency.
 INSTALLED_APPS = [
+    # Must be the very first entry - this is what makes `runserver` become
+    # Channels/daphne's ASGI-aware version instead of Django's plain WSGI
+    # one, which is required for the seat-picker WebSocket to work at all
+    # locally. Without this, `channels` alone does nothing for runserver -
+    # confirmed by testing: a raw WebSocket connect attempt returned a
+    # plain HTTP 404 (the WSGI server not recognizing the ws/ path) until
+    # this was added.
+    "daphne",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -24,11 +49,15 @@ INSTALLED_APPS = [
     "rest_framework",
     "django_filters",
     "rest_framework_simplejwt",
+    "channels",
     "users",
     "events",
     "bookings",
     "workflows",
     "payments",
+    "ai_assistant",
+    'venues',
+    'knowledge'
 ]
 
 MIDDLEWARE = [
@@ -61,6 +90,9 @@ TEMPLATES = [
 WSGI_APPLICATION = "core.wsgi.application"
 ASGI_APPLICATION = "core.asgi.application"
 
+# Postgres in every real environment. dev.py overrides this with SQLite
+# only when DB_NAME isn't set, so contributors can run the project without
+# a .env file — see the docstring at the top of dev.py.
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -79,6 +111,9 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_CLASSES": [
         "core.throttles.DefaultThrottle",
     ],
+    # Per-endpoint rate limits, keyed by the `throttle_scope` a view sets
+    # (see core/throttles.py). "booking" is deliberately the tightest —
+    # it's the only one that touches money/seat locks.
     "DEFAULT_THROTTLE_RATES": {
         "booking": "5/min",
         "auth": "10/min",
@@ -91,6 +126,9 @@ SIMPLE_JWT = {
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
+# Redis-backed cache, used for event/seat listing caches (see
+# BookingService.invalidate_event_cache) and anywhere else `cache.get`/
+# `cache.set` is used directly.
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
@@ -101,10 +139,40 @@ CACHES = {
     }
 }
 
+# Recurring background jobs, run by Celery Beat (see docker-compose.yml's
+# `celery-beat` service) and defined in workflows/tasks.py. All four run
+# every 5 minutes and exist to clean up or retry state that a request/
+# response cycle can't reliably handle on its own — e.g. a booking hold
+# that expires while nobody is looking at it.
 CELERY_BEAT_SCHEDULE = {
     "requeue-pending-jobs": {
         "task": "workflows.tasks.requeue_pending_jobs_task",
         "schedule": crontab(minute="*/5"),
+    },
+    "cleanup-expired-pending-bookings": {
+        "task": "workflows.tasks.cleanup_expired_pending_bookings_task",
+        "schedule": crontab(minute="*/5"),
+    },
+    "cleanup-expired-pending-cancellations": {
+        "task": "workflows.tasks.cleanup_expired_pending_cancellations_task",
+        "schedule": crontab(minute="*/5"),
+    },
+    "cleanup-expired-pending-payment-retries": {
+        "task": "workflows.tasks.cleanup_expired_pending_payment_retries_task",
+        "schedule": crontab(minute="*/5"),
+    },
+}
+
+# Channels config, used for WebSocket support. The `channels_redis`
+# backend is the only one that supports multiple workers, so it's the
+# only one we use in production. The `hosts` value is a list of Redis
+# servers to connect to; we only have one, so it's a single-item list.
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [("redis", 6379)],
+        },
     },
 }
 
@@ -144,11 +212,16 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = "UTC"
+TIME_ZONE = "Asia/Kolkata"
 USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+# For static assets not owned by any single app (e.g. shared admin JS) —
+# `core` itself isn't in INSTALLED_APPS (it's a plain shared-utilities
+# package, not a Django app), so its own static/ folder wouldn't be
+# discovered otherwise.
+STATICFILES_DIRS = [BASE_DIR / "static"]
 
 AUTH_USER_MODEL = "users.User"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
@@ -163,3 +236,18 @@ EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
 EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS") == "True"
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Model choice and embedding dimension live here, not hardcoded in
+# ai_assistant/services.py or knowledge/, so switching models (e.g. to a
+# larger embedding model) is a config change, not a code change. Note
+# EMBEDDING_DIMENSIONS must match whatever OPENAI_EMBEDDING_MODEL actually
+# outputs (text-embedding-3-small -> 1536, text-embedding-3-large -> 3072) —
+# changing the model without updating this causes embedding calls to fail
+# against the existing pgvector column, and changing this value alone does
+# NOT alter an already-migrated database column; that still needs a new
+# migration.
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))

@@ -9,7 +9,7 @@ from django.db import IntegrityError, connection
 
 from rest_framework.test import APIClient
 
-from bookings.models import Booking
+from bookings.models import Booking, BookingSeat
 from events.models import Event, Seat
 
 
@@ -52,34 +52,49 @@ class TestBooking(TestCase):
         booking = Booking.objects.create(
             user=self.user,
             event=self.event,
-            seat=self.seat,
             status="CONFIRMED",
             amount=100,
             idempotency_key=str(uuid.uuid4())
         )
 
+        BookingSeat.objects.create(
+            booking=booking,
+            seat=self.seat
+        )
+
         self.assertEqual(booking.status, "CONFIRMED")
-        self.assertEqual(booking.seat, self.seat)
+        self.assertEqual(
+            booking.booking_seats.first().seat,
+            self.seat
+        )
 
     def test_prevent_double_booking_model(self):
 
-        Booking.objects.create(
+        booking1 = Booking.objects.create(
             user=self.user,
             event=self.event,
-            seat=self.seat,
+            status="CONFIRMED",
+            amount=100,
+            idempotency_key=str(uuid.uuid4())
+        )
+
+        BookingSeat.objects.create(
+            booking=booking1,
+            seat=self.seat
+        )
+
+        booking2 = Booking.objects.create(
+            user=self.user,
+            event=self.event,
             status="CONFIRMED",
             amount=100,
             idempotency_key=str(uuid.uuid4())
         )
 
         with self.assertRaises(IntegrityError):
-            Booking.objects.create(
-                user=self.user,
-                event=self.event,
-                seat=self.seat,
-                status="CONFIRMED",
-                amount=100,
-                idempotency_key=str(uuid.uuid4())
+            BookingSeat.objects.create(
+                booking=booking2,
+                seat=self.seat
             )
 
     # -------------------------
@@ -89,7 +104,7 @@ class TestBooking(TestCase):
     def test_booking_create_api_success(self):
 
         response = self.client.post("/api/bookings/", {
-            "seat": self.seat.id,
+            "seats": [self.seat.id],
             "event": self.event.id,
             "idempotency_key": str(uuid.uuid4())
         })
@@ -104,7 +119,7 @@ class TestBooking(TestCase):
         client = APIClient()
 
         response = client.post("/api/bookings/", {
-            "seat": self.seat.id,
+            "seats": [self.seat.id],
             "event": self.event.id,
             "idempotency_key": str(uuid.uuid4())
         })
@@ -114,13 +129,13 @@ class TestBooking(TestCase):
     def test_prevent_double_booking_api(self):
 
         data1 = {
-            "seat": self.seat.id,
+            "seats": [self.seat.id],
             "event": self.event.id,
             "idempotency_key": str(uuid.uuid4())
         }
 
         data2 = {
-            "seat": self.seat.id,
+            "seats": [self.seat.id],
             "event": self.event.id,
             "idempotency_key": str(uuid.uuid4())
         }
@@ -136,7 +151,7 @@ class TestBooking(TestCase):
         key = str(uuid.uuid4())
 
         data = {
-            "seat": self.seat.id,
+            "seats": [self.seat.id],
             "event": self.event.id,
             "idempotency_key": key
         }
@@ -165,7 +180,7 @@ class TestBooking(TestCase):
                 client.force_authenticate(user=self.user)
 
                 response = client.post("/api/bookings/", {
-                    "seat": self.seat.id,
+                    "seats": [self.seat.id],
                     "event": self.event.id,
                     "idempotency_key": str(uuid.uuid4())
                 })
@@ -187,9 +202,9 @@ class TestBooking(TestCase):
             t.join()
 
         #  correct invariant check (NOT response-based)
-        confirmed_count = Booking.objects.filter(
+        confirmed_count = BookingSeat.objects.filter(
             seat=self.seat,
-            status="CONFIRMED"
+            booking__status="CONFIRMED"
         ).count()
 
         self.assertLessEqual(confirmed_count, 1)
@@ -201,7 +216,7 @@ class TestBooking(TestCase):
     def test_invalid_seat(self):
 
         response = self.client.post("/api/bookings/", {
-            "seat": 9999,
+            "seats": [9999],
             "event": self.event.id,
             "idempotency_key": str(uuid.uuid4())
         })
@@ -219,7 +234,7 @@ class TestBooking(TestCase):
         )
 
         response = self.client.post("/api/bookings/", {
-            "seat": self.seat.id,
+            "seats": [self.seat.id],
             "event": other_event.id,
             "idempotency_key": str(uuid.uuid4())
         })

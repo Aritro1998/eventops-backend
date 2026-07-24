@@ -1,19 +1,34 @@
+"""
+Read/write are deliberately split into separate serializers for Event:
+EventReadSerializer exposes computed fields (available_seats,
+is_general_admission) that only make sense coming out of the annotated
+queryset in EventService.get_events_with_available_seats, while
+EventWriteSerializer only accepts the raw fields an organizer actually
+submits. Reusing one serializer for both would mean either exposing
+write access to derived fields, or awkwardly making them optional.
+"""
+
 from django.utils import timezone
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 from rest_framework import serializers
 from .models import Event, Seat
 
 class EventReadSerializer(serializers.ModelSerializer):
-
-    # This is a derived field that calculates available seats on the fly (Non-optimized)
-    # available_seats = serializers.SerializerMethodField()
-
-    # This method is triggered from the SerializerMethodField to calculate available seats (Non-optimized)
-    # def get_available_seats(self, obj):
-    #     return obj.seats.filter(is_booked=False).count()
-
-    # This is an optimized field that relies on the annotation in the queryset to get available seats
+    """
+    available_seats and is_general_admission are both computed, not stored
+    columns — available_seats depends on the request-time annotation from
+    EventService (a per-request SQL COUNT, not a query-per-object
+    SerializerMethodField, which would be much slower for a list of
+    events); is_general_admission mirrors the Event.is_general_admission
+    property. Both must be declared here AND listed in Meta.fields below —
+    DRF raises an AssertionError at request time if a declared field is
+    missing from fields, a real bug this project hit once.
+    """
     available_seats = serializers.IntegerField(read_only=True)
+    is_general_admission = serializers.BooleanField(read_only=True)
+    venue_name = serializers.CharField(source='venue.name', read_only=True, default=None)
+    space_name = serializers.CharField(source='space.name', read_only=True, default=None)
 
     class Meta:
         model = Event
@@ -25,10 +40,18 @@ class EventReadSerializer(serializers.ModelSerializer):
             'total_seats',
             'available_seats',
             'price',
+            'venue',
+            'venue_name',
+            'space',
+            'space_name',
+            'is_general_admission',
         ]
 
 
-class EventSummerySerializer(serializers.ModelSerializer):
+class EventSummarySerializer(serializers.ModelSerializer):
+    """Minimal event shape for the AI assistant's search_events tool — just
+    enough for the model to identify and disambiguate events, kept small
+    since this gets fed straight into the LLM's context window."""
     class Meta:
         model = Event
         fields = [
@@ -40,16 +63,36 @@ class EventSummerySerializer(serializers.ModelSerializer):
         ]
 
 
-class SeatSummerySerializer(serializers.ModelSerializer):
+class SeatSummarySerializer(serializers.ModelSerializer):
+    """
+    Minimal seat shape for the AI assistant's get_available_seats tool.
+    Only used for labeled events — general admission events return a plain
+    count instead (see ai_assistant/tools/event_tools.py).
+
+    `label` is always present, falling back to the plain seat_number for
+    a custom event with no Space (no display_label). This is what the
+    model shows the user and what prepare_booking expects back — it
+    never has to compute or guess a label-to-seat_number mapping itself,
+    it only ever echoes back a label it was already shown.
+    """
+    label = serializers.SerializerMethodField()
+
     class Meta:
         model = Seat
         fields = [
             'id',
             'seat_number',
+            'label',
         ]
+
+    def get_label(self, obj):
+        return obj.display_label or str(obj.seat_number)
 
 
 class EventWriteSerializer(serializers.ModelSerializer):
+    """Used for create/update via the API (EventViewSet). created_by is
+    read-only here and set explicitly in create()/perform_create — never
+    trust a client-submitted created_by."""
     class Meta:
         model = Event
         read_only_fields = ['id', 'created_by']
@@ -60,7 +103,22 @@ class EventWriteSerializer(serializers.ModelSerializer):
             'end_time',
             'total_seats',
             'price',
+            'venue',
+            'space',
+            'is_archived',
         ]
+
+    def __init__(self, *args, **kwargs):
+        """total_seats is derived from the space's layout once one is
+        assigned — see EventService.sync_seats_on_update's docstring for
+        why an update must never let a client-submitted value overwrite
+        it. Mirrors EventAdmin.get_exclude's identical rule on the admin
+        side. Only applies to an existing space-backed event; a brand-new
+        event (self.instance is None) still submits it as the required
+        placeholder that sync_seats_on_create immediately replaces."""
+        super().__init__(*args, **kwargs)
+        if self.instance is not None and self.instance.space_id:
+            self.fields['total_seats'].read_only = True
 
     def validate(self, data):
         start = data.get('start_time')
@@ -69,19 +127,41 @@ class EventWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("End time must be after start time.")
         if start and start < timezone.now():
             raise serializers.ValidationError("Event cannot start in the past.")
+
+        # Reuse Event.clean() so the API enforces the exact same venue/space
+        # consistency and booking-safety rules as the admin panel, instead of
+        # duplicating that logic here.
+        instance = self.instance or Event()
+        for attr, value in data.items():
+            setattr(instance, attr, value)
+        try:
+            instance.clean()
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(e.message_dict if hasattr(e, 'message_dict') else e.messages)
+
         return data
     
     def validate_total_seats(self, value):
+        """DRF calls validate_<field> before the object-level validate()
+        above. Only reached at all for a brand-new event or an existing
+        event with no space — __init__ makes this field read-only (and
+        DRF skips validate_<field> for read-only fields) once an existing
+        event already has a space assigned. For a new space-backed event,
+        this value is still required as a positive placeholder that
+        EventService.sync_seats_on_create immediately overwrites."""
         if value <= 0:
             raise serializers.ValidationError("Total seats must be a positive integer.")
         return value
-    
+
     def validate_price(self, value):
         if value < 0:
             raise serializers.ValidationError("Price must be a non-negative value.")
         return value
-    
+
     def create(self, validated_data):
+        """created_by comes from the authenticated request, never from the
+        client payload — read_only_fields above already blocks it from
+        validated_data, this is the actual assignment."""
         validated_data['created_by'] = self.context['request'].user
         return super().create(validated_data)
     

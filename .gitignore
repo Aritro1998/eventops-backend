@@ -5,3 +5,8 @@ __pycache__/
 db.sqlite3
 celerybeat-schedule
 celerybeat-schedule.*
+.vscode/
+**/.DS_Store
+
+# Local Codex project instructions
+AGENTS.md

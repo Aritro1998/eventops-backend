@@ -1,8 +1,19 @@
+"""
+Payment is a real gateway integration's shape, but `gateway` defaults to
+'SIMULATED' and PaymentService (see payments/services.py) never actually
+calls out to a real payment provider — this project simulates success/
+failure so booking flows can be built and tested without one.
+"""
+
 from django.db import models
 from bookings.models import Booking
 
 
 class Payment(models.Model):
+    """One-to-one with Booking — a booking has at most one Payment record,
+    reused across retries (see PaymentService.process_payment) rather than
+    creating a new Payment row per attempt."""
+
     STATUS_CHOICES = [
         ('PENDING', 'Pending'),
         ('SUCCESS', 'Success'),

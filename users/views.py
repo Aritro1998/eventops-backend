@@ -9,9 +9,13 @@ from .serializers import RegisterSerializer
 
 logger = logging.getLogger(__name__)
 
-# Create your views here.
 class RegisterView(APIView):
+    """Public signup endpoint — POST username/email/password, get back a
+    new USER-role account. Login itself is handled separately by
+    SimpleJWT's TokenObtainPairView (see core/urls.py), not this view."""
+
     throttle_classes = [AuthThrottle]
+
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
 

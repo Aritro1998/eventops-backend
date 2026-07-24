@@ -26,6 +26,7 @@ from events import urls as events_urls
 from bookings import urls as bookings_urls
 from users import urls as auth_urls
 from workflows import urls as workflows_urls
+from ai_assistant import urls as ai_assistant_urls
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -35,6 +36,7 @@ urlpatterns = [
     path('api/events/', include(events_urls)),
     path('api/bookings/', include(bookings_urls)),
     path('api/workflows/', include(workflows_urls)),
+    path('api/ai-assistant/', include(ai_assistant_urls)),
 ]
 
 if settings.DEBUG:
