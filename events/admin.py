@@ -50,6 +50,48 @@ class EventAdmin(admin.ModelAdmin):
     class Media:
         js = ["admin/chained_select.js"]
 
+    def _is_admin(self, request):
+        return request.user.is_superuser or getattr(request.user, "role", None) == "ADMIN"
+
+    def get_queryset(self, request):
+        """Mirrors IsAdminOrOrganizer.has_object_permission on the API side:
+        admins see everything, organizers see only events they created,
+        anyone else (shouldn't normally have change_event permission at
+        all, but just in case) sees nothing."""
+        qs = super().get_queryset(request)
+        if self._is_admin(request):
+            return qs
+        if getattr(request.user, "role", None) == "ORGANIZER":
+            return qs.filter(created_by=request.user)
+        return qs.none()
+
+    def has_change_permission(self, request, obj=None):
+        if not super().has_change_permission(request, obj):
+            return False
+        if obj is None or self._is_admin(request):
+            return True
+        return (
+            getattr(request.user, "role", None) == "ORGANIZER"
+            and obj.created_by_id == request.user.id
+        )
+
+    def has_delete_permission(self, request, obj=None):
+        if not super().has_delete_permission(request, obj):
+            return False
+        if obj is None or self._is_admin(request):
+            return True
+        return (
+            getattr(request.user, "role", None) == "ORGANIZER"
+            and obj.created_by_id == request.user.id
+        )
+
+    def get_exclude(self, request, obj=None):
+        """Organizers can't hand-pick created_by — same as the API's
+        perform_create, which forces it to request.user regardless of
+        what the client submits."""
+        exclude = super().get_exclude(request, obj) or ()
+        return (*exclude, "created_by") if not self._is_admin(request) else exclude
+
     def archive_events(self, request, queryset):
         """
         Bulk action: the intended way to retire an event with booking
@@ -79,9 +121,11 @@ class EventAdmin(admin.ModelAdmin):
                 obj.save()
                 EventService.sync_seats_on_update(obj, old_total_seats, old_space_id)
             else:
+                if not self._is_admin(request):
+                    obj.created_by = request.user
                 obj.save()
                 EventService.sync_seats_on_create(obj)
-                
+
 
 @admin.register(Seat)
 class SeatAdmin(admin.ModelAdmin):
@@ -92,3 +136,34 @@ class SeatAdmin(admin.ModelAdmin):
     list_filter = ["event"]
     search_fields = ["seat_number", "event__name"]
     list_display_links = ["id", "event"]
+
+    def _is_admin(self, request):
+        return request.user.is_superuser or getattr(request.user, "role", None) == "ADMIN"
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        if self._is_admin(request):
+            return qs
+        if getattr(request.user, "role", None) == "ORGANIZER":
+            return qs.filter(event__created_by=request.user)
+        return qs.none()
+
+    def has_change_permission(self, request, obj=None):
+        if not super().has_change_permission(request, obj):
+            return False
+        if obj is None or self._is_admin(request):
+            return True
+        return (
+            getattr(request.user, "role", None) == "ORGANIZER"
+            and obj.event.created_by_id == request.user.id
+        )
+
+    def has_delete_permission(self, request, obj=None):
+        if not super().has_delete_permission(request, obj):
+            return False
+        if obj is None or self._is_admin(request):
+            return True
+        return (
+            getattr(request.user, "role", None) == "ORGANIZER"
+            and obj.event.created_by_id == request.user.id
+        )
