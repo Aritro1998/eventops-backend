@@ -1,6 +1,7 @@
 from datetime import datetime, time
 from rapidfuzz import process, fuzz
 
+from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.db.models import Count, Q, F
@@ -108,9 +109,55 @@ class EventService:
         Seat.objects.bulk_create([Seat(event=event, **spec) for spec in seat_specs])
 
     @staticmethod
+    def _apply_space_layout(event):
+        """
+        Re-derive total_seats and Seat rows from event.space's CURRENT
+        layout, replacing whatever seats currently exist. Shared by the
+        space_changed branch of sync_seats_on_update (the event's space
+        assignment itself just changed) and resync_seats_from_space (an
+        explicit, deliberate refresh when the space's layout changed but
+        the assignment didn't). Callers must already be inside an open
+        transaction — this uses select_for_update().
+        """
+        total_seats, seat_specs = EventService.build_seat_specs(event.space, event.total_seats)
+        event.total_seats = total_seats
+        event.save(update_fields=['total_seats'])
+
+        # Lock the event's existing seats before replacing them —
+        # create_booking() locks a Seat row, not the Event row, so
+        # without this a concurrent booking could commit in the gap
+        # between the caller's own check and the delete below.
+        old_seat_ids = list(
+            Seat.objects.select_for_update().filter(event=event).values_list('id', flat=True)
+        )
+        has_any_booking = BookingSeat.objects.filter(seat_id__in=old_seat_ids).exists()
+        if has_any_booking:
+            raise DjangoValidationError(
+                "Cannot regenerate seats for an event that already has booking history."
+            )
+        Seat.objects.filter(id__in=old_seat_ids).delete()
+        Seat.objects.bulk_create([Seat(event=event, **spec) for spec in seat_specs])
+
+    @staticmethod
     def sync_seats_on_update(event, old_total_seats, old_space_id):
         """
         Call after an existing Event is saved with possibly-changed total_seats/space.
+
+        Deliberately does NOT recompute total_seats/Seat rows from the
+        space's current layout on every save when the space assignment
+        itself is unchanged — editing a Space's rows/columns elsewhere
+        (venues/admin.py) must never silently change an already-existing
+        Event's seat count just because that event happens to get resaved
+        for something unrelated (renaming it, changing price). This used
+        to recompute unconditionally here, which meant admin.py's own
+        "total_seats is just a throwaway placeholder" note was actually
+        wrong for a space-backed event's *second* save onward — it silently
+        overwrote total_seats from whatever the space's layout had become
+        by then, with no matching Seat regeneration unless the space FK
+        itself had also changed. See EventAdmin.get_exclude/
+        EventWriteSerializer, which now lock total_seats once a space is
+        attached, and resync_seats_from_space for the explicit, deliberate
+        way to pick up a Space's updated layout on an existing event.
 
         Event.clean() already validates this is safe (space can't change with
         any booking history; total_seats can't shrink past booked seats) —
@@ -123,28 +170,33 @@ class EventService:
         level either — these checks exist purely so the caller gets a clean,
         expected error instead of an unhandled ProtectedError.
         """
-        total_seats, seat_specs = EventService.build_seat_specs(event.space, event.total_seats)
-        event.total_seats = total_seats
-        event.save(update_fields=['total_seats'])
-
         space_changed = event.space_id != old_space_id
         if space_changed:
-            # Lock the event's existing seats before replacing them —
-            # create_booking() locks a Seat row, not the Event row, so
-            # without this a concurrent booking could commit in the gap
-            # between Event.clean()'s check and the delete below.
-            old_seat_ids = list(
-                Seat.objects.select_for_update().filter(event=event).values_list('id', flat=True)
-            )
-            has_any_booking = BookingSeat.objects.filter(seat_id__in=old_seat_ids).exists()
-            if has_any_booking:
-                raise DjangoValidationError(
-                    "Cannot change the space for an event that already has booking history."
-                )
-            Seat.objects.filter(id__in=old_seat_ids).delete()
-            Seat.objects.bulk_create([Seat(event=event, **spec) for spec in seat_specs])
+            EventService._apply_space_layout(event)
         elif not event.space_id and event.total_seats != old_total_seats:
             EventService.resize_plain_seats(event, old_total_seats)
+
+    @staticmethod
+    def resync_seats_from_space(event):
+        """
+        Explicitly re-derive total_seats/Seat rows from event.space's
+        current layout, even though the space assignment itself hasn't
+        changed — the deliberate, on-demand counterpart to
+        sync_seats_on_update, which intentionally never does this
+        automatically (see that method's docstring). This is what
+        EventAdmin's "Resync seats from space" action calls.
+
+        Opens its own transaction rather than relying on a caller-provided
+        one, since (unlike sync_seats_on_update) this isn't always invoked
+        from inside an existing save_model/perform_update atomic block.
+        """
+        if not event.space_id:
+            raise DjangoValidationError(
+                "This event has no space assigned — there is no layout to resync from."
+            )
+
+        with transaction.atomic():
+            EventService._apply_space_layout(event)
 
     @staticmethod
     def has_booking_history(event):

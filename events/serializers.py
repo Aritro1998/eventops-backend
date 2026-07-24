@@ -108,6 +108,18 @@ class EventWriteSerializer(serializers.ModelSerializer):
             'is_archived',
         ]
 
+    def __init__(self, *args, **kwargs):
+        """total_seats is derived from the space's layout once one is
+        assigned — see EventService.sync_seats_on_update's docstring for
+        why an update must never let a client-submitted value overwrite
+        it. Mirrors EventAdmin.get_exclude's identical rule on the admin
+        side. Only applies to an existing space-backed event; a brand-new
+        event (self.instance is None) still submits it as the required
+        placeholder that sync_seats_on_create immediately replaces."""
+        super().__init__(*args, **kwargs)
+        if self.instance is not None and self.instance.space_id:
+            self.fields['total_seats'].read_only = True
+
     def validate(self, data):
         start = data.get('start_time')
         end = data.get('end_time')
@@ -131,10 +143,12 @@ class EventWriteSerializer(serializers.ModelSerializer):
     
     def validate_total_seats(self, value):
         """DRF calls validate_<field> before the object-level validate()
-        above. Note: if a space is selected, this value gets silently
-        overwritten by EventService.sync_seats_on_create/update anyway —
-        it's still required as a positive placeholder for now (see the
-        note in events/admin.py's docstring)."""
+        above. Only reached at all for a brand-new event or an existing
+        event with no space — __init__ makes this field read-only (and
+        DRF skips validate_<field> for read-only fields) once an existing
+        event already has a space assigned. For a new space-backed event,
+        this value is still required as a positive placeholder that
+        EventService.sync_seats_on_create immediately overwrites."""
         if value <= 0:
             raise serializers.ValidationError("Total seats must be a positive integer.")
         return value
