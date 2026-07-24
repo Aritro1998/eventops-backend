@@ -131,4 +131,29 @@ class PendingPaymentRetry(PendingActionBase):
             .afirst()
         )
 
+
+class UsageLog(models.Model):
+    """
+    One row per OpenAI API call (not per user turn - see chat_stream in
+    ai_assistant/services.py, which can make up to MAX_TOOL_CALLS calls
+    for a single user message, each logged separately here). 
+    """
+    conversation_id = models.CharField(max_length=255, db_index=True)
+    # SET_NULL, not CASCADE - a deleted user's usage history is still real
+    # spend that happened and shouldn't silently disappear with them.
+    # Nullable because anonymous (not-logged-in) chat is allowed.
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="usage_logs")
+    model = models.CharField(max_length=100)
+    prompt_tokens = models.IntegerField()
+    completion_tokens = models.IntegerField()
+    total_tokens = models.IntegerField()
+    system_prompt_tokens = models.IntegerField(null=True, blank=True)
+    tool_called = models.CharField(max_length=100, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['user']),
+            models.Index(fields=['created_at'])
+        ]
     

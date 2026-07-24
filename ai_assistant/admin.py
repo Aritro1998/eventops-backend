@@ -1,5 +1,12 @@
 from django.contrib import admin
-from ai_assistant.models import PendingBooking, PendingBookingCancellation, PendingPaymentRetry
+from django.db.models import Sum, Count
+from django.db.models.functions import TruncDate
+from ai_assistant.models import (
+    PendingBooking, 
+    PendingBookingCancellation, 
+    PendingPaymentRetry,
+    UsageLog,
+)
 
 
 # Mostly for debugging a specific user's stuck/confusing draft state — in
@@ -25,3 +32,94 @@ class PendingPaymentRetryAdmin(admin.ModelAdmin):
     list_display = ["id", "user", "booking", "created_at", "expires_at"]
     search_fields = ["user__username", "booking__id"]
     list_display_links = ["id", "user", "booking"]
+    
+    
+@admin.register(UsageLog)
+class UsageLogAdmin(admin.ModelAdmin):
+    """
+    Read-only by design (see has_add_permission/has_change_permission
+    below) — unlike the Pending* models above, this is a permanent audit
+    record of what was actually spent, not a draft. Editing a token count
+    after the fact would corrupt that record, so admin can view/search/
+    filter it but never hand-edit or hand-create a row. Deletion is left
+    at Django's normal permission default (superusers only) rather than
+    blocked outright, in case old rows ever need pruning under a
+    retention policy - there isn't one yet.
+    """
+    list_display = [
+        "id", "conversation_id", "user", "model", "system_prompt_tokens",
+        "prompt_tokens", "completion_tokens", "total_tokens", "tool_called", "created_at",
+    ]
+    list_filter = ["model", "user", "tool_called"]
+    search_fields = ["conversation_id", "user__username"]
+    list_display_links = ["id", "conversation_id"]
+    # Adds the year/month/day drill-down at the top of the list view -
+    # exactly the kind of time-based browsing the upcoming Conversation
+    # analytics milestone will also need, so this is free groundwork.
+    date_hierarchy = "created_at"
+    
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+    
+    def changelist_view(self, request, extra_context=None):
+        """
+        Injects an aggregate summary above the row list - totals,
+        per-model breakdown, per-day trend, and the system-prompt-overhead
+        percentage that motivated tracking system_prompt_tokens in the
+        first place. Runs against whatever's currently filtered/searched
+        (cl.queryset, pulled off the response super() already built),
+        not UsageLog.objects.all() - so drilling into one model or one
+        day via the admin's own filters updates the summary too, instead
+        of it always showing the global picture regardless of what's on
+        screen.
+        """
+        response = super().changelist_view(request, extra_context=extra_context)
+        
+        if not hasattr(response, "context_data"):
+            return response
+        
+        queryset = response.context_data["cl"].queryset
+        
+        totals = queryset.aggregate(
+            call_count=Count("id"),
+            conversation_count=Count("conversation_id", distinct=True),
+            prompt_tokens=Sum("prompt_tokens"),
+            completion_tokens=Sum("completion_tokens"),
+            total_tokens=Sum("total_tokens"),
+            system_prompt_tokens=Sum("system_prompt_tokens"),
+        )
+        
+        # Guard against dividing by zero when the current filter matches
+        # no rows at all (e.g. a date range with no activity yet).
+        system_prompt_pct = None
+        if totals["prompt_tokens"]:
+            system_prompt_pct = round(
+                100 * (totals["system_prompt_tokens"] or 0) / totals["prompt_tokens"], 1
+            )
+            
+        per_model = (
+            queryset.values("model")
+            .annotate(total_tokens=Sum("total_tokens"), call_count=Count("id"))
+            .order_by("-total_tokens")
+        )
+
+        per_day = (
+            queryset.annotate(day=TruncDate("created_at"))
+            .values("day")
+            .annotate(total_tokens=Sum("total_tokens"))
+            .order_by("day")
+        )
+
+        response.context_data["usage_summary"] = {
+            "totals": totals,
+            "system_prompt_pct": system_prompt_pct,
+            "per_model": per_model,
+            "per_day": per_day,
+        }
+        
+        return response
+    
+    

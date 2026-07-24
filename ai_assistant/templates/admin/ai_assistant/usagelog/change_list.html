@@ -1,0 +1,64 @@
+{% extends "admin/change_list.html" %}
+{% comment %}
+Why this file lives at this exact path:
+
+ai_assistant/templates/ - WHERE Django looks for templates at all. This
+project's TEMPLATES setting has APP_DIRS: True and DIRS: [] (no shared
+project-level templates folder), so Django only scans each installed
+app's own templates/ subfolder and merges them into one namespace - a
+template has to live under some app's templates/ dir or it won't be
+found, there's no other location available.
+
+admin/ai_assistant/usagelog/change_list.html - WHICH template, Django
+admin's own namespacing, not a filesystem requirement. ModelAdmin.
+changelist_view() doesn't look for one fixed name - it checks a list of
+candidates, most specific first:
+    admin/ai_assistant/usagelog/change_list.html  (this model only)
+    admin/ai_assistant/change_list.html            (any model in this app)
+    admin/change_list.html                          (Django's own default)
+and renders with the first one that exists. The app_label/model_name
+segment exists so every model in every app can override this template
+independently without colliding on the same filename - without it, this
+file and some future Booking-specific override would both be fighting
+over one path.
+
+This block-style comment sits right after extends, not before it,
+because extends must be the literal first tag in the file - anything
+non-text before it (including a comment tag) raises TemplateSyntaxError,
+confirmed directly against this exact file. The alternative, Django's
+hash-style {# ... #} comment, CAN legally precede extends, but only
+safely strips single-line content - a multi-line hash-style comment
+silently fails to strip at all and leaks its literal text into the
+rendered page instead of raising any error (also confirmed directly,
+the hard way, against this exact file). This block-style comment is
+what actually needs multi-line support, so it goes here instead.
+{% endcomment %}
+
+{% block content_title %}
+  <h1>{{ title }}</h1>
+  {% if usage_summary %}
+    <div style="margin: 10px 0 20px; padding: 12px 16px; border: 1px solid #ccc;">
+      <strong>Totals</strong> —
+      {{ usage_summary.totals.call_count }} calls across
+      {{ usage_summary.totals.conversation_count }} conversations,
+      {{ usage_summary.totals.total_tokens|default:0 }} tokens
+      ({{ usage_summary.totals.prompt_tokens|default:0 }} prompt /
+      {{ usage_summary.totals.completion_tokens|default:0 }} completion)
+      {% if usage_summary.system_prompt_pct %}
+        — system prompt is {{ usage_summary.system_prompt_pct }}% of prompt tokens
+      {% endif %}
+
+      <p><strong>Per model</strong>
+      {% for row in usage_summary.per_model %}
+        — {{ row.model }}: {{ row.total_tokens }} tokens ({{ row.call_count }} calls)
+      {% endfor %}
+      </p>
+
+      <p><strong>Per day</strong>
+      {% for row in usage_summary.per_day %}
+        — {{ row.day }}: {{ row.total_tokens }}
+      {% endfor %}
+      </p>
+    </div>
+  {% endif %}
+{% endblock %}

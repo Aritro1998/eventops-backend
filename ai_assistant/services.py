@@ -14,6 +14,7 @@ instead of hanging or looping forever.
 
 import json
 import logging
+import tiktoken
 from openai import AsyncOpenAI
 from django.utils import timezone
 from asgiref.sync import sync_to_async
@@ -21,8 +22,8 @@ from asgiref.sync import sync_to_async
 from events.models import Event
 from events.services import EventService
 from ai_assistant.chat_state import ChatState
-from ai_assistant.models import PendingBooking
 from ai_assistant.tools.registry import TOOL_REGISTRY
+from ai_assistant.models import PendingBooking, UsageLog
 from core.settings.base import OPENAI_API_KEY, OPENAI_CHAT_MODEL
 from ai_assistant.actions.booking_actions import get_pending_booking_draft
 from ai_assistant.actions.payment_actions import get_pending_payment_retry_draft
@@ -333,14 +334,20 @@ class AIAssistantService:
         """
         Conversation loop that yields pieces as they arrive instead of returning one finished answer.
         """
+        system_prompt = await get_system_prompt(
+            user=user,
+            request=request,
+            chat_state=chat_state,
+        )
+        
+        system_prompt_tokens = len(
+            tiktoken.encoding_for_model(OPENAI_CHAT_MODEL).encode(system_prompt)
+        )
+        
         messages = [
             {
                 "role": "system",
-                "content": await get_system_prompt(
-                    user=user,
-                    request=request,
-                    chat_state=chat_state,
-                ),
+                "content": system_prompt,
             },
             *chat_state["history"],
             {"role": "user", "content": user_prompt},
@@ -358,7 +365,8 @@ class AIAssistantService:
                     temperature=0,
                     tools=tools,
                     parallel_tool_calls=False,
-                    stream=True
+                    stream=True,
+                    stream_options={"include_usage": True},
                 )
             except Exception:
                 logger.exception("openai_call_failed")
@@ -368,8 +376,22 @@ class AIAssistantService:
             # Tool-call fragments arrive by index (0, 1, ...) across many
             # chunks — id/name/arguments each get built up piece by piece.
             tool_calls_by_index = {}
+            # Populated only by the final chunk below - stays None if a
+            # stream somehow ends without ever sending it.
+            usage = None
             
             async for chunk in stream:
+                
+                if not chunk.choices:
+                    # stream_options={"include_usage": True} adds exactly one
+                    # extra chunk at the very end whose choices list is empty
+                    # and which carries only .usage - not a normal content or
+                    # tool-call chunk. chunk.choices[0] on THIS chunk raises
+                    # IndexError, so it must be caught before the unguarded
+                    # access on the next line.
+                    usage = chunk.usage
+                    continue
+                
                 delta = chunk.choices[0].delta
                 
                 if delta.content:
@@ -392,6 +414,23 @@ class AIAssistantService:
                             entry["name"] += tc_delta.function.name
                         if tc_delta.function and tc_delta.function.arguments:
                             entry["arguments"] += tc_delta.function.arguments
+            
+            if usage is not None:
+                tool_called = next(
+                    (entry["name"] for entry in tool_calls_by_index.values()),
+                    None,
+                )
+                
+                await UsageLog.objects.acreate(
+                    conversation_id=conversation_id,
+                    user=user if user and user.is_authenticated else None,
+                    model=OPENAI_CHAT_MODEL,
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    total_tokens=usage.total_tokens,
+                    system_prompt_tokens=system_prompt_tokens,
+                    tool_called=tool_called,
+                )
             
             if not tool_calls_by_index:
                 # Plain-text answer — every piece was already streamed above.
