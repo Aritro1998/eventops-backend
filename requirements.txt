@@ -33,3 +33,5 @@ django-debug-toolbar==4.4.6
 openai>=2.0.0,<3.0.0
 gradio==5.31.0
 huggingface_hub>=0.28.1,<1.0
+langchain-core>=0.3,<0.4
+langchain-openai>=0.3,<0.4
