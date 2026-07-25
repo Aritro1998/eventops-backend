@@ -14,6 +14,7 @@ import uuid
 from django.core.cache import cache
 from rest_framework.exceptions import ValidationError, PermissionDenied
 
+
 class ChatState:
     """Class of classmethods rather than instances — state itself is a
     plain dict passed around explicitly (see chat_stream in services.py),
