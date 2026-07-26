@@ -17,9 +17,10 @@ from events.models import Event, Seat
 from events.services import EventService
 from bookings.services import BookingService
 from bookings.serializers import BookingReadSerializer
-from ai_assistant.models import PendingBookingThread, get_pending_action_expiry, PendingBookingCancellation
 from ai_assistant.langgraph_flows.booking_graph import get_booking_graph
 from ai_assistant.langgraph_flows.payment_retry_graph import get_payment_retry_graph
+from ai_assistant.langgraph_flows.cancel_booking_graph import get_cancel_booking_graph
+from ai_assistant.models import PendingBookingThread, get_pending_action_expiry, PendingBookingCancellation
 
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,16 @@ def prepare_cancel_booking(
         raise ValueError("Booking not found.")
     if booking.status != "CONFIRMED":
         raise ValueError("Only CONFIRMED bookings can be cancelled.")
+    
+    # Pause the cancel graph right here, waiting for a human to click
+    # Confirm Cancellation or Keep Booking - thread_id=f"cancel-{booking.id}",
+    # so a later resume (see ai_assistant/actions/cancellation_actions.py)
+    # knows exactly which paused thread to continue.
+    graph = get_cancel_booking_graph()
+    graph.invoke(
+        {"booking_id": booking.id},
+        config={"configurable": {"thread_id": f"cancel-{booking.id}"}}
+    )
 
     # Create or replace the pending cancellation - the booking itself
     # stays CONFIRMED until the user actually confirms this.

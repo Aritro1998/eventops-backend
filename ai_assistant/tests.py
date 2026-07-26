@@ -10,13 +10,20 @@ from django.utils import timezone
 from events.models import Event, Seat
 from bookings.models import Booking, BookingSeat
 from langgraph.types import Command
+from ai_assistant.models import PendingBookingCancellation, get_pending_action_expiry
 from ai_assistant.langgraph_flows.booking_graph import get_booking_graph
 from ai_assistant.langgraph_flows.payment_retry_graph import get_payment_retry_graph
+from ai_assistant.langgraph_flows.cancel_booking_graph import get_cancel_booking_graph
 from ai_assistant.langgraph_flows.checkpointer import close_checkpointer
 from ai_assistant.actions.payment_actions import (
     dismiss_payment_retry,
     confirm_payment_retry,
     get_pending_payment_retry_actions,
+)
+from ai_assistant.actions.cancellation_actions import (
+    confirm_cancellation,
+    dismiss_cancellation,
+    get_pending_cancellation_actions,
 )
 
 User = get_user_model()
@@ -214,3 +221,141 @@ class TestPaymentRetryGraph(TestCase):
         self.assertEqual(get_pending_payment_retry_actions(self.user), [])
         with self.assertRaises(ValueError):
             confirm_payment_retry(self.user)
+
+
+class TestCancelBookingGraph(TestCase):
+
+    def setUp(self):
+        self.cancel_graph = get_cancel_booking_graph()
+        booking_graph = get_booking_graph()
+
+        self.user = User.objects.create_user(username="testuser3", email="t3@example.com", password="StrongPass@123")
+        self.event = Event.objects.create(
+            name="Test Event 3", description="", price=100.00, total_seats=10,
+            start_time=timezone.now() + timedelta(hours=2),
+            end_time=timezone.now() + timedelta(hours=4),
+            created_by=self.user,
+        )
+        Seat.objects.create(event=self.event, seat_number=1)
+
+        # Create a real CONFIRMED booking to cancel, the same way
+        # TestBookingGraph does - via booking_graph itself, with payment
+        # forced to succeed.
+        thread_id = str(uuid.uuid4())
+        config = {"configurable": {"thread_id": thread_id}}
+        with patch("payments.services.random.choice", return_value=True):
+            booking_graph.invoke(
+                {"conversation_id": thread_id, "draft_id": str(uuid.uuid4()), "user_id": self.user.id,
+                 "event_id": self.event.id, "seat_numbers": [1], "amount": "100.00"},
+                config=config,
+            )
+            result = booking_graph.invoke(Command(resume="confirm"), config=config)
+        self.booking_id = result["result"]["booking_id"]
+
+    def _start(self):
+        config = {"configurable": {"thread_id": f"cancel-{self.booking_id}"}}
+        self.cancel_graph.invoke({"booking_id": self.booking_id}, config=config)
+        return config
+
+    def test_keep_at_first_pause_leaves_booking_confirmed(self):
+        config = self._start()
+        result = self.cancel_graph.invoke(Command(resume="keep"), config=config)
+        self.assertEqual(result["result"]["status"], "KEPT")
+        self.assertEqual(Booking.objects.get(id=self.booking_id).status, "CONFIRMED")
+
+    def test_confirm_then_confirm_cancels(self):
+        config = self._start()
+        self.cancel_graph.invoke(Command(resume="confirm"), config=config)
+        self.assertEqual(self.cancel_graph.get_state(config).next, ("await_double_confirm",))
+        result = self.cancel_graph.invoke(Command(resume="confirm"), config=config)
+        self.assertEqual(result["result"]["status"], "CANCELLED")
+        self.assertEqual(Booking.objects.get(id=self.booking_id).status, "CANCELLED")
+
+    def test_confirm_then_keep_backs_out(self):
+        config = self._start()
+        self.cancel_graph.invoke(Command(resume="confirm"), config=config)
+        result = self.cancel_graph.invoke(Command(resume="keep"), config=config)
+        self.assertEqual(result["result"]["status"], "KEPT")
+        self.assertEqual(Booking.objects.get(id=self.booking_id).status, "CONFIRMED")
+
+
+class TestCancellationActions(TestCase):
+    """Exercises the action layer (the PendingBookingCancellation marker
+    plus confirm_cancellation's two-stage "resolved" contract), not just
+    the raw graph - this is exactly the layer ConfirmCancellationActionView
+    depends on, and where a real bug (the view never branching on
+    "resolved") slipped through until caught by manual testing."""
+
+    def setUp(self):
+        self.cancel_graph = get_cancel_booking_graph()
+        booking_graph = get_booking_graph()
+
+        self.user = User.objects.create_user(username="testuser4", email="t4@example.com", password="StrongPass@123")
+        self.event = Event.objects.create(
+            name="Test Event 4", description="", price=100.00, total_seats=10,
+            start_time=timezone.now() + timedelta(hours=2),
+            end_time=timezone.now() + timedelta(hours=4),
+            created_by=self.user,
+        )
+        Seat.objects.create(event=self.event, seat_number=1)
+
+        thread_id = str(uuid.uuid4())
+        config = {"configurable": {"thread_id": thread_id}}
+        with patch("payments.services.random.choice", return_value=True):
+            booking_graph.invoke(
+                {"conversation_id": thread_id, "draft_id": str(uuid.uuid4()), "user_id": self.user.id,
+                 "event_id": self.event.id, "seat_numbers": [1], "amount": "100.00"},
+                config=config,
+            )
+            result = booking_graph.invoke(Command(resume="confirm"), config=config)
+        self.booking = Booking.objects.get(id=result["result"]["booking_id"])
+
+    def _stage_cancellation(self):
+        # Mirrors prepare_cancel_booking's two side effects (pause the
+        # graph, create the marker) without going through the LangChain
+        # tool layer itself.
+        self.cancel_graph.invoke(
+            {"booking_id": self.booking.id},
+            config={"configurable": {"thread_id": f"cancel-{self.booking.id}"}},
+        )
+        PendingBookingCancellation.objects.update_or_create(
+            user=self.user,
+            defaults={"booking": self.booking, "expires_at": get_pending_action_expiry()},
+        )
+
+    def test_first_confirm_click_only_advances_to_are_you_sure(self):
+        self._stage_cancellation()
+        result = confirm_cancellation(self.user)
+        self.assertFalse(result["resolved"])
+        self.assertEqual(result["cancellation"]["booking_id"], self.booking.id)
+        self.assertIn("Are you sure", result["cancellation"]["prompt"])
+        # Still staged - the marker must not have been cleared yet.
+        self.assertTrue(PendingBookingCancellation.objects.filter(user=self.user).exists())
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, "CONFIRMED")
+
+    def test_second_confirm_click_actually_cancels(self):
+        self._stage_cancellation()
+        confirm_cancellation(self.user)
+        result = confirm_cancellation(self.user)
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["booking"]["status"], "CANCELLED")
+        self.assertFalse(PendingBookingCancellation.objects.filter(user=self.user).exists())
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, "CANCELLED")
+
+    def test_keep_at_are_you_sure_backs_out(self):
+        self._stage_cancellation()
+        confirm_cancellation(self.user)
+        result = dismiss_cancellation(self.user)
+        self.assertEqual(result["status"], "KEPT")
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, "CONFIRMED")
+        self.assertFalse(PendingBookingCancellation.objects.filter(user=self.user).exists())
+
+    def test_cancellation_actions_disappear_once_resolved(self):
+        self._stage_cancellation()
+        self.assertTrue(get_pending_cancellation_actions(self.user))
+        confirm_cancellation(self.user)
+        confirm_cancellation(self.user)
+        self.assertEqual(get_pending_cancellation_actions(self.user), [])

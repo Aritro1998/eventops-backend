@@ -685,10 +685,16 @@ def render_draft_card(draft):
 
 
 def render_cancel_prepare_card(cancellation):
-    # Shown when the AI stages a cancellation (prepare_cancel_booking ran this
-    # turn). Unlike render_draft_card, this includes the Booking ID — that's
-    # the detail a user checks to catch the AI staging the wrong one of their
-    # bookings (e.g. two bookings for the same event) before clicking confirm.
+    # Shown when the AI stages a cancellation (prepare_cancel_booking ran
+    # this turn) AND when a first "Confirm Cancellation" click moves the
+    # backend's cancel graph to its second, "are you sure" pause instead of
+    # finishing outright — same card, same Confirm Cancellation/Keep
+    # Booking buttons below it, just a different title/subtitle driven by
+    # whether the backend included a "prompt" (only present at that second
+    # pause; see ai_assistant/actions/cancellation_actions.py). Unlike
+    # render_draft_card, this includes the Booking ID — that's the detail a
+    # user checks to catch the AI staging the wrong one of their bookings
+    # (e.g. two bookings for the same event) before clicking confirm.
     rows = [
         ("Event", escape(cancellation.get("event_name", ""))),
         seat_display_row(cancellation),
@@ -696,6 +702,11 @@ def render_cancel_prepare_card(cancellation):
         ("Amount", f"₹{escape(cancellation.get('amount', ''))}"),
         ("Booking ID", escape(str(cancellation.get("booking_id", "")))),
     ]
+
+    prompt = cancellation.get("prompt")
+    if prompt:
+        return render_status_card("&#9888;", "#dc2626", "Are You Sure?", escape(prompt), rows)
+
     return render_status_card(
         "&#9888;",
         "#d97706",
@@ -1064,7 +1075,16 @@ def run_draft_action(url, token, history, current_actions, conversation_id, acti
         payload={"conversation_id": conversation_id},
     )
     booking = data.get("booking")
-    if booking:
+    # Cancellation is the one action with a middle step: a first "Confirm
+    # Cancellation" click can move the backend's cancel graph to its
+    # second, "are you sure" pause instead of resolving outright - that
+    # response carries "cancellation" (staging-shaped, with a "prompt"),
+    # not "booking". Checked before "booking" since a genuinely finished
+    # result never carries both.
+    cancellation = data.get("cancellation")
+    if cancellation:
+        content = render_cancel_prepare_card(cancellation)
+    elif booking:
         content = render_booking_card(booking)
     else:
         content = data.get("response", data.get("error", "Action failed."))

@@ -250,20 +250,33 @@ class ConfirmCancellationActionView(APIView):
     
     def post(self, request):
         try:
-            booking = confirm_cancellation(request.user)
+            result = confirm_cancellation(request.user)
         except ValueError as error:
             return Response(
                 {"detail": str(error)},
                 status=status.HTTP_400_BAD_REQUEST
             )
-            
+
+        if not result["resolved"]:
+            # Only advanced the cancel graph to its second, "are you sure"
+            # pause - nothing actually happened to the booking yet, so
+            # there's no outcome to persist into chat history here.
+            return Response(
+                {
+                    "response": "Are you sure you want to cancel this booking?",
+                    "cancellation": result["cancellation"],
+                    "actions": get_all_pending_actions(request.user),
+                }
+            )
+
+        booking = result["booking"]
         response_text = (
             f"Your booking for {booking['event_name']} has been cancelled. "
             f"Booking ID: {booking['booking_id']}."
         )
-        
+
         persist_action_outcome(request, response_text)
-        
+
         return Response(
             {
                 "response": response_text,
