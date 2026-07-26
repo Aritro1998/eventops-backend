@@ -1,4 +1,13 @@
+"""
+Tools that let the assistant read a user's bookings and stage changes
+to them - a new booking, a payment retry, or a cancellation. None of
+these tools make the change immediately: each one only creates a draft
+that still needs the user's explicit confirmation through the app's own
+confirm/cancel controls before anything actually happens.
+"""
+
 import logging
+import uuid
 from typing import Annotated, Optional
 
 from langchain_core.tools import tool, InjectedToolArg
@@ -8,8 +17,9 @@ from events.models import Event, Seat
 from events.services import EventService
 from bookings.services import BookingService
 from bookings.serializers import BookingReadSerializer
-from ai_assistant.actions.payment_actions import stage_payment_retry
-from ai_assistant.models import PendingBooking, get_pending_action_expiry, PendingBookingCancellation
+from ai_assistant.models import PendingBookingThread, get_pending_action_expiry, PendingBookingCancellation
+from ai_assistant.langgraph_flows.booking_graph import get_booking_graph
+from ai_assistant.langgraph_flows.payment_retry_graph import get_payment_retry_graph
 
 
 logger = logging.getLogger(__name__)
@@ -32,7 +42,7 @@ def get_my_bookings(
         "ai_tool_get_my_bookings",
         extra={"event": "ai_tool_get_my_bookings", "user_id": user.id, "status": status}
     )
-    
+
     bookings = BookingService.get_user_bookings(user, status_filter=status)
     return BookingReadSerializer(bookings, many=True).data
 
@@ -60,14 +70,22 @@ def prepare_payment_retry(
         "ai_tool_prepare_payment_retry",
         extra={"event": "ai_tool_prepare_payment_retry", "user_id": user.id, "booking_id": booking_id}
     )
-    
+
+    # Only the caller's own booking can be found here, and only in a
+    # state where a retry actually makes sense.
     booking = BookingService.get_booking_for_user(booking_id, user)
     if not booking:
         raise ValueError("Booking not found.")
     if booking.status not in ["FAILED", "PENDING"]:
         raise ValueError("Payment cannot be retried for this booking status.")
 
-    stage_payment_retry(booking)
+    # Pause the retry graph, waiting for a human to click Retry Payment
+    # Now / Not Now - no payment is attempted here.
+    retry_graph = get_payment_retry_graph()
+    retry_graph.invoke(
+        {"booking_id": booking.id},
+        config={"configurable": {"thread_id": f"booking-{booking.id}"}},
+    )
 
     return {
         "booking_id": booking.id,
@@ -108,6 +126,8 @@ def prepare_cancel_booking(
     if booking.status != "CONFIRMED":
         raise ValueError("Only CONFIRMED bookings can be cancelled.")
 
+    # Create or replace the pending cancellation - the booking itself
+    # stays CONFIRMED until the user actually confirms this.
     PendingBookingCancellation.objects.update_or_create(
         user=user,
         defaults={"booking": booking, "expires_at": get_pending_action_expiry()},
@@ -120,12 +140,13 @@ def prepare_cancel_booking(
         "amount": str(booking.amount),
         "status": "awaiting_cancellation_confirmation",
     }
-    
+
 
 @tool
 def prepare_booking(
     user: Annotated[User, InjectedToolArg],
     chat_state: Annotated[dict, InjectedToolArg],
+    conversation_id: Annotated[str, InjectedToolArg],
     seat_labels: Optional[list[str]] = None,
     quantity: Optional[int] = None,
 ) -> dict:
@@ -133,10 +154,13 @@ def prepare_booking(
     Prepare or replace a pending booking before final confirmation.
     Call this when the user chooses seats for a new booking, or when an
     existing pending booking exists and the user asks to change the
-    seats. For labeled/reserved-seating events, pass seat_labels — the
-    exact label strings shown in get_available_seats's seats list (e.g.
-    ['A1', 'B4']), never a seat_number, and never a label you have not
-    actually seen returned by get_available_seats in this conversation.
+    seats. For labeled/reserved-seating events, pass seat_labels — exactly
+    the label strings the user typed or selected (e.g. ['A1', 'B4']),
+    never a seat_number. You are never shown the individual seat labels
+    yourself (get_available_seats only reports a count); the user picks
+    them from a live seat map next to the chat, and this tool validates
+    each one against the real seat map itself, returning an error for any
+    label that's invalid or no longer free.
     For general admission events (get_available_seats returned
     general_admission: true), pass quantity instead — never ask a
     general admission user to pick seats. After this tool succeeds,
@@ -149,6 +173,8 @@ def prepare_booking(
             (e.g. ['A1', 'B4']). Only for labeled/reserved-seating events.
         quantity: Number of tickets. Only for general admission events.
     """
+    # The event being booked is whatever get_available_seats last looked
+    # at - never something the model names directly.
     event_id = chat_state.get("selected_event_id")
     if event_id is None:
         raise ValueError("Choose an event and view its available seats before selecting seats.")
@@ -167,6 +193,8 @@ def prepare_booking(
     event = Event.objects.select_related('space').get(id=event_id)
 
     if event.is_general_admission:
+        # General admission: reserve however many open seats are
+        # needed - their individual identity is never shown to the user.
         if quantity is None or quantity <= 0:
             raise ValueError("This is a general admission event. Specify a quantity of tickets, not seats.")
         if seat_labels:
@@ -178,6 +206,8 @@ def prepare_booking(
         if len(seat_numbers) < quantity:
             raise ValueError(f"Only {len(seat_numbers)} tickets are available for {event.name}.")
     else:
+        # Labeled seating: turn the seat labels the user chose back
+        # into real seat numbers, and check every one is still free.
         if not seat_labels:
             raise ValueError("Choose at least one seat for this event.")
         if quantity:
@@ -207,14 +237,38 @@ def prepare_booking(
             unavailable_labels = [seat_number_to_label[sn] for sn in unavailable_seat_numbers]
             raise ValueError(f"Seats {unavailable_labels} are no longer available for {event.name}.")
 
-    PendingBooking.objects.update_or_create(
-        user=user,
-        defaults={
-            "event": event,
+    # Pause the booking graph right here, waiting for a human to click
+    # Confirm or Cancel - thread_id=conversation_id, so a later resume
+    # (see ai_assistant/actions/booking_actions.py) knows exactly which
+    # paused thread to continue. Calling invoke() again on this same
+    # thread (e.g. the user changes their seat selection before
+    # confirming) restarts the pause with the new state, replacing
+    # whatever was paused there before.
+    graph = get_booking_graph()
+    graph.invoke(
+        {
+            "conversation_id": conversation_id,
+            # Minted fresh every time a draft is (re)staged, so confirm_node's
+            # idempotency key can't collide with an earlier, unrelated
+            # booking confirmed earlier in this same conversation - see
+            # booking_graph.py's confirm_node for why conversation_id alone
+            # isn't safe to use there.
+            "draft_id": str(uuid.uuid4()),
+            "user_id": user.id,
+            "event_id": event_id,
             "seat_numbers": seat_numbers,
-            "amount": event.price * len(seat_numbers),
-            "expires_at": get_pending_action_expiry(),
-        }
+            "amount": str(event.price * len(seat_numbers)),
+        },
+        config={"configurable": {"thread_id": conversation_id}},
+    )
+
+    # This marker is the only thing that lets a later request find its
+    # way back to the paused thread above - see PendingBookingThread's
+    # own docstring for why a plain graph checkpoint isn't enough on
+    # its own.
+    PendingBookingThread.objects.update_or_create(
+        user=user,
+        defaults={"conversation_id": conversation_id, "expires_at": get_pending_action_expiry()},
     )
 
     return {
@@ -224,4 +278,3 @@ def prepare_booking(
         "status": "awaiting_confirmation",
         "amount": str(event.price * len(seat_numbers)),
     }
-    

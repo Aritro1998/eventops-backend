@@ -1,71 +1,90 @@
 """
-Execute half of "propose vs execute" for payment retries — same structure
-as booking_actions.py/cancellation_actions.py, with one addition:
-stage_payment_retry is also called automatically (not just from the AI
-tool) right after a payment attempt fails, from confirm_pending_booking
-and confirm_payment_retry themselves, so the retry controls reappear
-without the user having to ask the AI again.
+Execute half of "propose vs execute" for payment retries - same
+structure as booking_actions.py. Unlike the booking draft (which needs
+PendingBookingThread as a marker), no separate marker is needed here: a
+real Booking row already exists by the time a retry is possible, and its
+own status ("FAILED" = eligible, anything else = not) is a reliable
+signal on its own. booking_actions.confirm_pending_booking already
+pauses the retry graph the instant a payment fails, so "status ==
+FAILED" and "has an active paused retry thread" stay in sync by
+construction, not by a second piece of state that could drift from it.
 """
 
 from asgiref.sync import sync_to_async
+from langgraph.types import Command
 
+from bookings.models import Booking
 from payments.services import PaymentService
 from ai_assistant.models import PendingPaymentRetry, get_pending_action_expiry
+from ai_assistant.langgraph_flows.payment_retry_graph import get_payment_retry_graph
+
 
 def stage_payment_retry(booking):
-    """Create/replace the retry-confirmation row for this booking.
+    """Create/replace the retry-confirmation row for this booking - kept
+    only for ai_assistant/tools/booking_tools.py (the vanilla
+    implementation, still used for eval comparison), which stages a
+    PendingPaymentRetry row rather than pausing payment_retry_graph. The
+    live path (ai_assistant/langchain_tools/) pauses the graph directly
+    instead of calling this."""
 
-    Shared by prepare_payment_retry (the AI tool, conversational path) and
-    confirm_pending_booking / confirm_payment_retry (the auto-staged path,
-    called the instant a payment attempt fails) — both need the identical
-    "remember this booking is awaiting a retry click" step, just reached
-    differently. Callers are responsible for validating ownership/status
-    first; this function only stages.
-    """
-    
     PendingPaymentRetry.objects.update_or_create(
         user=booking.user,
         defaults={"booking": booking, "expires_at": get_pending_action_expiry()},
     )
-    
+
+
+def _retry_thread_config(booking):
+    return {"configurable": {"thread_id": f"booking-{booking.id}"}}
+
+
+def _is_awaiting_retry_decision(booking):
+    """
+    Booking.status == "FAILED" alone isn't enough to know whether the
+    Retry Payment Now / Not Now controls should still show. Giving up
+    (dismiss_payment_retry) ends the retry graph without changing the
+    booking's status - there's nothing else to flip since the booking
+    genuinely is still FAILED - so without this check the actions/draft
+    below would keep reporting a retry as available forever after it was
+    explicitly dismissed. The same check also correctly hides these
+    controls for a FAILED booking that was never routed through this
+    graph at all (e.g. a payment retried directly via the plain REST API
+    instead of through the AI).
+    """
+    graph = get_payment_retry_graph()
+    return bool(graph.get_state(_retry_thread_config(booking)).next)
+
 
 def get_pending_payment_retry_actions(user):
-    """Return UI actions only when the user has a booking staged for retry."""
-    
-    pending = PendingPaymentRetry.for_user(user)
-    
-    if not pending:
+    """Return UI actions only when the user has a booking eligible for retry."""
+
+    booking = Booking.objects.filter(user=user, status="FAILED").order_by("-created_at").first()
+
+    if not booking or not _is_awaiting_retry_decision(booking):
         return []
-    
-    if pending.is_expired:
-        pending.delete()
-        return []
-    
-    if pending.booking.status not in ("FAILED", "PENDING"):
-        pending.delete()
-        return []
-    
+
     return [
         {"type": "confirm_payment_retry", "label": "Retry Payment Now"},
         {"type": "dismiss_payment_retry", "label": "Not Now"},
     ]
-    
-    
+
+
 async def get_pending_payment_retry_draft(user):
-    """Return the staged retry's details for rendering, or None."""
+    """Return the eligible booking's details for rendering, or None."""
 
-    pending = await PendingPaymentRetry.afor_user(user)
-    
-    if not pending or pending.is_expired:
+    booking = await (
+        Booking.objects
+        .filter(user=user, status="FAILED")
+        .select_related("event")
+        .prefetch_related("booking_seats__seat")
+        .order_by("-created_at")
+        .afirst()
+    )
+
+    if not booking or not await sync_to_async(_is_awaiting_retry_decision)(booking):
         return None
 
-    if pending.booking.status not in ("FAILED", "PENDING"):
-        await pending.adelete()
-        return None
-
-    booking = pending.booking
-    # seat_display touches event.space (not covered by afor_user's
-    # prefetch) and is shared with sync callers elsewhere, so it's wrapped
+    # seat_display touches event.space (not covered by the prefetch
+    # above) and is shared with sync callers elsewhere, so it's wrapped
     # here rather than converted natively.
     seat_display = await sync_to_async(booking.seat_display)()
 
@@ -81,41 +100,19 @@ async def get_pending_payment_retry_draft(user):
 
 
 def confirm_payment_retry(user):
-    """Actually attempt the payment again for the staged booking."""
-    
-    pending = PendingPaymentRetry.for_user(user)
-    
-    if not pending:
-        raise ValueError("No pending payment retry found")
-    
-    if pending.is_expired:
-        pending.delete()
-        raise ValueError("This retry request has expired. Please try again.")
-    
-    if pending.booking.status not in ("FAILED", "PENDING"):
-        pending.delete()
-        raise ValueError("This booking is no longer eligible for a payment retry.")
-    
-    booking = pending.booking
-    
-    try:
-        PaymentService.process_payment(booking.id)
-    except ValueError:
-        # Whatever blocked this attempt (expired, retry limit hit) means
-        # there's nothing left to stage — clear the pending row so the
-        # buttons don't linger for a booking that can no longer be retried.
-        pending.delete()
-        raise
-    
-    booking.refresh_from_db()
+    """Actually attempt the payment again for the eligible booking."""
 
-    if booking.status == "FAILED" and booking.retry_count < PaymentService.MAX_RETRIES:
-        # Still eligible — replace the pending row so the buttons reappear
-        # for another attempt, instead of leaving a stale one around.
-        stage_payment_retry(booking)
-    else:
-        # CONFIRMED or EXPIRED — no more retries possible either way.
-        pending.delete()
+    booking = Booking.objects.filter(user=user, status="FAILED").order_by("-created_at").first()
+
+    if not booking:
+        raise ValueError("No pending payment retry found")
+
+    if not _is_awaiting_retry_decision(booking):
+        raise ValueError("This booking is no longer eligible for a payment retry.")
+
+    graph = get_payment_retry_graph()
+    graph.invoke(Command(resume="retry"), config=_retry_thread_config(booking))
+    booking.refresh_from_db()
 
     return {
         "booking_id": booking.id,
@@ -127,28 +124,27 @@ def confirm_payment_retry(user):
         "expires_at": booking.expires_at.isoformat(),
         "attempts_remaining": max(0, PaymentService.MAX_RETRIES - booking.retry_count),
     }
-    
-    
+
+
 def dismiss_payment_retry(user):
     """Back out of a staged retry — the booking is left exactly as it was."""
-    
-    pending = PendingPaymentRetry.for_user(user)
-    
-    if not pending:
+
+    booking = Booking.objects.filter(user=user, status="FAILED").order_by("-created_at").first()
+
+    if not booking:
         raise ValueError("No pending payment retry found.")
-    
-    booking = pending.booking
-    seat_display = booking.seat_display()
-    pending.delete()
+
+    if _is_awaiting_retry_decision(booking):
+        graph = get_payment_retry_graph()
+        graph.invoke(Command(resume="give_up"), config=_retry_thread_config(booking))
 
     return {
         "booking_id": booking.id,
         "event_name": booking.event.name,
-        **seat_display,
+        **booking.seat_display(),
         "status": booking.status,  # untouched — still whatever it was
         "amount": str(booking.amount),
         "event_start_time": booking.event.start_time.isoformat(),
         "expires_at": booking.expires_at.isoformat(),
         "attempts_remaining": max(0, PaymentService.MAX_RETRIES - booking.retry_count),
     }
-    

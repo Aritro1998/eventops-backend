@@ -8,19 +8,20 @@ to show the Confirm/Cancel controls.
 """
 
 from asgiref.sync import sync_to_async
+from langgraph.types import Command
 
-from events.models import Event, Seat
+from events.models import Event
 from events.services import EventService
 from payments.services import PaymentService
-from bookings.services import BookingService
-from ai_assistant.models import PendingBooking
-from ai_assistant.actions.payment_actions import stage_payment_retry
+from ai_assistant.models import PendingBookingThread
+from ai_assistant.langgraph_flows.booking_graph import get_booking_graph
+from ai_assistant.langgraph_flows.payment_retry_graph import get_payment_retry_graph
 
 
 def get_pending_booking_actions(user):
     """Return UI actions only when the authenticated user has a live draft."""
 
-    pending = PendingBooking.for_user(user)
+    pending = PendingBookingThread.for_user(user)
 
     if not pending:
         return []
@@ -38,30 +39,38 @@ def get_pending_booking_actions(user):
 async def get_pending_booking_draft(user):
     """Return the current draft's details for rendering, or None."""
 
-    pending = await PendingBooking.afor_user(user)
+    pending = await PendingBookingThread.afor_user(user)
 
     if not pending or pending.is_expired:
         return None
 
-    # describe_seats is shared with sync callers elsewhere (confirm/cancel,
-    # the AI tools) so it stays sync itself — wrapped here rather than
-    # converted natively.
-    seat_display = await sync_to_async(EventService.describe_seats)(pending.event, pending.seat_numbers)
+    graph = get_booking_graph()
+    config = {"configurable": {"thread_id": pending.conversation_id}}
+    state = await sync_to_async(graph.get_state)(config)
+
+    if not state.next:
+        # The graph already finished (confirmed/cancelled some other way)
+        # but the marker wasn't cleaned up - treat it as gone.
+        await pending.adelete()
+        return None
+
+    event = await Event.objects.select_related("space").aget(id=state.values["event_id"])
+    seat_display = await sync_to_async(EventService.describe_seats)(event, state.values["seat_numbers"])
 
     return {
-        "event_name": pending.event.name,
-        # Presentation only — see EventService.describe_seats. Identity
-        # for confirmation still lives on pending.seat_numbers.
+        "event_id": event.id,
+        "event_name": event.name,
         **seat_display,
-        "amount": str(pending.amount),
-        "event_start_time": pending.event.start_time.isoformat(),
+        "amount": state.values["amount"],
+        "event_start_time": event.start_time.isoformat(),
     }
 
 
 def confirm_pending_booking(user):
-    """Turn the user's draft into a real booking using the existing service."""
+    """Resume the paused booking graph with the user's confirmation,
+    turning the draft into a real booking using the existing service."""
 
-    pending = PendingBooking.for_user(user)
+    pending = PendingBookingThread.for_user(user)
 
     if not pending:
         raise ValueError("No pending booking found")
@@ -70,42 +79,45 @@ def confirm_pending_booking(user):
         pending.delete()
         raise ValueError("Pending booking has expired. Please choose seats again.")
 
-    event = Event.objects.get(id=pending.event_id)
-    seat_numbers = pending.seat_numbers
-    seat_ids = list(
-        Seat.objects.filter(
-            event=event,
-            seat_number__in=seat_numbers
-        ).values_list('id', flat=True)
-    )
+    graph = get_booking_graph()
+    config = {"configurable": {"thread_id": pending.conversation_id}}
+    state = graph.get_state(config)
+    if not state.next:
+        pending.delete()
+        raise ValueError("No pending booking found")
 
-    # Do not silently drop a seat if a stale draft references invalid data.
-    if len(seat_ids) != len(set(seat_numbers)):
-        raise ValueError("The pending booking contains invalid seats. Please choose seats again.")
-
-    booking, is_existing = BookingService.create_booking_for_user(
-        user=user,
-        event=event,
-        seat_ids=seat_ids,
-        # Stable per pending-booking row, not random, so two racing confirm
-        # clicks against the same draft share one key instead of each minting
-        # its own — letting the idempotency lookup actually catch the second one.
-        idempotency_key=f"ai-confirm-{pending.id}"
-    )
-
+    result = graph.invoke(Command(resume="confirm"), config=config)
+    booking_result = result.get("result")
     pending.delete()
-    
+
+    if not booking_result:
+        raise ValueError("No pending booking found")
+
+    from bookings.models import Booking
+    booking = (
+        Booking.objects
+        .select_related("event")
+        .prefetch_related("booking_seats__seat")
+        .get(id=booking_result["booking_id"])
+    )
+
     if booking.status == "FAILED" and booking.retry_count < PaymentService.MAX_RETRIES:
-        stage_payment_retry(booking)
+        # Pause the retry graph immediately so the Retry Payment Now /
+        # Not Now controls are available right away, without the user
+        # needing to ask the AI again.
+        retry_graph = get_payment_retry_graph()
+        retry_graph.invoke(
+            {"booking_id": booking.id},
+            config={"configurable": {"thread_id": f"booking-{booking.id}"}},
+        )
 
     return {
         "booking_id": booking.id,
-        "event_name": event.name,
-        **EventService.describe_seats(event, seat_numbers),
+        "event_name": booking.event.name,
+        **booking.seat_display(),
         "status": booking.status,
         "amount": str(booking.amount),
-        "is_existing": is_existing,
-        "event_start_time": event.start_time.isoformat(),
+        "event_start_time": booking.event.start_time.isoformat(),
         "expires_at": booking.expires_at.isoformat(),
         "attempts_remaining": max(0, PaymentService.MAX_RETRIES - booking.retry_count),
     }
@@ -114,13 +126,23 @@ def confirm_pending_booking(user):
 def cancel_pending_booking_draft(user):
     """Discard only the authenticated user's unconfirmed booking draft."""
 
-    pending = PendingBooking.for_user(user)
+    pending = PendingBookingThread.for_user(user)
 
     if not pending:
         raise ValueError("No pending booking found")
 
-    event_name = pending.event.name
-    seat_display = EventService.describe_seats(pending.event, pending.seat_numbers)
+    graph = get_booking_graph()
+    config = {"configurable": {"thread_id": pending.conversation_id}}
+    state = graph.get_state(config)
+    if not state.next:
+        pending.delete()
+        raise ValueError("No pending booking found")
+
+    event = Event.objects.get(id=state.values["event_id"])
+    seat_display = EventService.describe_seats(event, state.values["seat_numbers"])
+    event_name = event.name
+
+    graph.invoke(Command(resume="cancel"), config=config)
     pending.delete()
 
     return {

@@ -18,7 +18,7 @@ import json
 import logging
 
 from .chat_state import ChatState
-from .services import AIAssistantService
+from ai_assistant.langchain_tools.chat_service import chat_stream
 from core.throttles import BookingThrottle
 
 from django.views import View
@@ -159,9 +159,8 @@ class ChatStreamView(View):
             conversation_id, chat_state = await sync_to_async(ChatState.create)(user=request.user)
             
         async def event_stream():
-            ai_service = AIAssistantService()
             try:
-                async for event in ai_service.chat_stream(
+                async for event in chat_stream(
                     user_prompt,
                     user=request.user,
                     request=request,
