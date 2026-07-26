@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.db.models import Sum, Count
 from django.db.models.functions import TruncDate
+from knowledge.services import KnowledgeService
 from ai_assistant.models import (
     PendingBookingThread,
     PendingBookingCancellation,
@@ -41,7 +42,7 @@ class UsageLogAdmin(admin.ModelAdmin):
     retention policy - there isn't one yet.
     """
     list_display = [
-        "id", "conversation_id", "user", "model", "system_prompt_tokens",
+        "id", "conversation_id", "user", "call_type", "model", "system_prompt_tokens",
         "prompt_tokens", "completion_tokens", "total_tokens", "tool_called", "created_at",
     ]
     list_filter = ["model", "user", "tool_called"]
@@ -51,7 +52,18 @@ class UsageLogAdmin(admin.ModelAdmin):
     # exactly the kind of time-based browsing the upcoming Conversation
     # analytics milestone will also need, so this is free groundwork.
     date_hierarchy = "created_at"
-    
+
+    @admin.display(description="Call Type")
+    def call_type(self, obj):
+        # Distinguishes embedding calls (search_knowledge_base's RAG
+        # search - real OpenAI spend, but no completion/system-prompt
+        # tokens the way a chat turn has) from ordinary chat completions,
+        # without needing a schema change: model name is what actually
+        # differs, so that's what this reads instead of tool_called
+        # (which stays accurate even if another tool starts calling
+        # embeddings later).
+        return "Embedding" if obj.model == KnowledgeService.EMBEDDING_MODEL else "Chat"
+
     def has_add_permission(self, request):
         return False
 

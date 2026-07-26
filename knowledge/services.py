@@ -97,6 +97,14 @@ class KnowledgeService:
         client = OpenAI(api_key=OPENAI_API_KEY)
         response = client.embeddings.create(model=KnowledgeService.EMBEDDING_MODEL, input=[query])
         query_embedding = response.data[0].embedding
+        
+        # Embeddings have no separate "completion" - prompt_tokens and
+        # total_tokens are the same number, unlike a chat completion's usage.
+        usage = {
+            "prompt_tokens": response.usage.prompt_tokens,
+            "total_tokens": response.usage.total_tokens,
+        }
+        
         queryset = KnowledgeChunk.objects.select_related('document')
         
         if venue is not None or event is not None:
@@ -107,8 +115,10 @@ class KnowledgeService:
                 scope |= Q(document__event=event)
             queryset = queryset.filter(scope)
             
-        return list(
+        chunks = list(
             queryset.annotate(
                 distance=CosineDistance('embedding', query_embedding)
             ).order_by('distance')[:top_k]
         )
+        
+        return chunks, usage

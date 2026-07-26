@@ -9,6 +9,7 @@ from typing import Annotated
 from langchain_core.tools import tool, InjectedToolArg
 
 from events.models import Event
+from ai_assistant.models import UsageLog
 from knowledge.services import KnowledgeService
 
 
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 def search_knowledge_base(
     query: str,
     chat_state: Annotated[dict, InjectedToolArg],
+    conversation_id: Annotated[str, InjectedToolArg],
 ) -> dict:
     """
     Search venue and event knowledge documents (policies, rules,
@@ -50,7 +52,19 @@ def search_knowledge_base(
         if event:
             venue = event.venue
 
-    chunks = KnowledgeService.search(query, venue=venue, event=event)
+    chunks, usage = KnowledgeService.search(query, venue=venue, event=event)
+    
+    # The RAG search itself is a real, separate OpenAI call (embeddings,
+    # not chat completions) - logged here rather than in run_turn since
+    # that's the only place the usage numbers are actually available.
+    UsageLog.objects.create(
+        conversation_id=conversation_id,
+        model=KnowledgeService.EMBEDDING_MODEL,
+        prompt_tokens=usage["prompt_tokens"],
+        completion_tokens=0,
+        total_tokens=usage["total_tokens"],
+        tool_called="search_knowledge_base",
+    )
 
     return {
         "results": [

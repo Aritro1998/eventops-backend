@@ -55,7 +55,7 @@ TOOL_REGISTRY = {
     "prepare_booking": {"tool": prepare_booking, "requires_auth": True, "requires_chat_state": True, "requires_conversation_id": True},
     "prepare_payment_retry": {"tool": prepare_payment_retry, "requires_auth": True},
     "prepare_cancel_booking": {"tool": prepare_cancel_booking, "requires_auth": True},
-    "search_knowledge_base": {"tool": search_knowledge_base, "requires_chat_state": True},
+    "search_knowledge_base": {"tool": search_knowledge_base, "requires_chat_state": True, "requires_conversation_id": True},
 }
 
 
