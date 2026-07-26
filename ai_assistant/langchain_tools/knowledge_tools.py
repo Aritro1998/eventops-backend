@@ -1,3 +1,8 @@
+"""
+Tool that lets the assistant answer policy and venue-information
+questions by searching stored knowledge documents instead of guessing.
+"""
+
 import logging
 from typing import Annotated
 
@@ -33,6 +38,9 @@ def search_knowledge_base(
         extra={"event": "ai_tool_search_knowledge_base", "query": query}
     )
 
+    # If an event is currently selected in this conversation, narrow the
+    # search to that event and its venue. Otherwise search only
+    # general, non-venue-specific documents.
     event_id = chat_state.get('selected_event_id')
     venue = None
     event = None

@@ -18,7 +18,7 @@ import json
 import logging
 
 from .chat_state import ChatState
-from ai_assistant.langchain_tools.chat_service import chat_stream
+from ai_assistant.services import chat_stream
 from core.throttles import BookingThrottle
 
 from django.views import View

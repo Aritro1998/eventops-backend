@@ -15,22 +15,7 @@ from langgraph.types import Command
 
 from bookings.models import Booking
 from payments.services import PaymentService
-from ai_assistant.models import PendingPaymentRetry, get_pending_action_expiry
 from ai_assistant.langgraph_flows.payment_retry_graph import get_payment_retry_graph
-
-
-def stage_payment_retry(booking):
-    """Create/replace the retry-confirmation row for this booking - kept
-    only for ai_assistant/tools/booking_tools.py (the vanilla
-    implementation, still used for eval comparison), which stages a
-    PendingPaymentRetry row rather than pausing payment_retry_graph. The
-    live path (ai_assistant/langchain_tools/) pauses the graph directly
-    instead of calling this."""
-
-    PendingPaymentRetry.objects.update_or_create(
-        user=booking.user,
-        defaults={"booking": booking, "expires_at": get_pending_action_expiry()},
-    )
 
 
 def _retry_thread_config(booking):

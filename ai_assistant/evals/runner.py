@@ -23,13 +23,17 @@ declare any combination of:
 from asgiref.sync import sync_to_async
 
 from ai_assistant.chat_state import ChatState
-from ai_assistant.services import AIAssistantService
+from ai_assistant.services import chat_stream as default_chat_stream
 
 
-async def run_eval(question, user):
-    """Run one eval question through the real chat_stream() method — the
-    same code path the actual app uses — and check the outcome against
-    what the question declares as correct."""
+async def run_eval(question, user, chat_fn=None):
+    """Run one eval question through a chat_stream()-shaped async
+    generator and check the outcome against what the question declares
+    as correct. Defaults to the real production code path
+    (ai_assistant.services.chat_stream) when chat_fn isn't given, so
+    passing an alternate implementation (matching the same call
+    signature) is the only thing needed to run the identical questions
+    against it instead."""
     if "setup" in question:
         # setup callables (discovery_questions.py etc.) are plain sync
         # functions doing ordinary ORM queries — they're eval fixtures, not
@@ -40,17 +44,18 @@ async def run_eval(question, user):
     # Evals must never see a leftover draft from a previous run — otherwise
     # the model correctly (and confusingly) reports "you already have a
     # pending draft" instead of exercising the behavior being tested.
-    from ai_assistant.models import PendingBooking, PendingBookingCancellation, PendingPaymentRetry
-    await sync_to_async(PendingBooking.objects.filter(user=user).delete)()
+    from ai_assistant.models import PendingBookingThread, PendingBookingCancellation
+    await sync_to_async(PendingBookingThread.objects.filter(user=user).delete)()
     await sync_to_async(PendingBookingCancellation.objects.filter(user=user).delete)()
-    await sync_to_async(PendingPaymentRetry.objects.filter(user=user).delete)()
 
     conversation_id, chat_state = await sync_to_async(ChatState.create)(user=user)
     tool_call_log = []
 
-    ai_service = AIAssistantService()
+    if chat_fn is None:
+        chat_fn = default_chat_stream
+
     response_text = ""
-    async for event in ai_service.chat_stream(
+    async for event in chat_fn(
         question["prompt"],
         user=user,
         request=None,
@@ -93,10 +98,11 @@ async def run_eval(question, user):
     }
 
 
-async def run_eval_suite(questions, user):
+async def run_eval_suite(questions, user, chat_fn=None):
     """Run every question in a list (see discovery_questions.py's
     DISCOVERY_QUESTIONS / booking_questions.py's BOOKING_QUESTIONS) and
-    summarize pass/fail counts."""
-    results = [await run_eval(q, user) for q in questions]
+    summarize pass/fail counts. chat_fn is forwarded to run_eval
+    unchanged - see its docstring."""
+    results = [await run_eval(q, user, chat_fn=chat_fn) for q in questions]
     passed = sum(1 for r in results if r["passed"])
     return {"total": len(results), "passed": passed, "failed": len(results) - passed, "results": results}

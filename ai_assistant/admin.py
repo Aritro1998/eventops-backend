@@ -2,10 +2,8 @@ from django.contrib import admin
 from django.db.models import Sum, Count
 from django.db.models.functions import TruncDate
 from ai_assistant.models import (
-    PendingBooking,
     PendingBookingThread,
     PendingBookingCancellation,
-    PendingPaymentRetry,
     UsageLog,
 )
 
@@ -13,14 +11,6 @@ from ai_assistant.models import (
 # Mostly for debugging a specific user's stuck/confusing draft state — in
 # normal operation these rows are created/deleted by the AI tools and
 # action views (see ai_assistant/models.py's module docstring), not admin.
-@admin.register(PendingBooking)
-class PendingBookingAdmin(admin.ModelAdmin):
-    list_display = ["id", "user", "event", "amount", "created_at", "expires_at"]
-    list_filter = ["event"]
-    search_fields = ["user__username"]
-    list_display_links = ["id", "user", "event"]
-
-
 @admin.register(PendingBookingThread)
 class PendingBookingThreadAdmin(admin.ModelAdmin):
     """The graph-based flow's version of PendingBookingAdmin above - a
@@ -33,13 +23,6 @@ class PendingBookingThreadAdmin(admin.ModelAdmin):
 
 @admin.register(PendingBookingCancellation)
 class PendingBookingCancellationAdmin(admin.ModelAdmin):
-    list_display = ["id", "user", "booking", "created_at", "expires_at"]
-    search_fields = ["user__username", "booking__id"]
-    list_display_links = ["id", "user", "booking"]
-
-
-@admin.register(PendingPaymentRetry)
-class PendingPaymentRetryAdmin(admin.ModelAdmin):
     list_display = ["id", "user", "booking", "created_at", "expires_at"]
     search_fields = ["user__username", "booking__id"]
     list_display_links = ["id", "user", "booking"]

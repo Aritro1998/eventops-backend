@@ -1,12 +1,14 @@
 """
 Celery task definitions. process_workflow_job is the actual worker for
 WorkflowJob rows (dispatches by job_type to the handle_* functions at the
-bottom of this file); the four *_task functions below it are what
+bottom of this file); the three *_task functions below it are what
 CELERY_BEAT_SCHEDULE (core/settings/base.py) fires every 5 minutes —
-requeue_pending_jobs_task recovers stuck WorkflowJobs, the three
-cleanup_expired_* tasks garbage-collect the AI assistant's PendingBooking/
-PendingBookingCancellation/PendingPaymentRetry rows that nobody confirmed
-in time.
+requeue_pending_jobs_task recovers stuck WorkflowJobs, the two
+cleanup_expired_* tasks garbage-collect the AI assistant's
+PendingBookingThread/PendingBookingCancellation rows that nobody confirmed
+in time. There is no equivalent cleanup for a stale payment-retry
+LangGraph checkpoint yet — a FAILED booking with an abandoned paused
+retry thread just sits there; see payment_retry_graph.py.
 """
 
 import logging
@@ -161,12 +163,14 @@ def requeue_pending_jobs_task():
 @shared_task
 def cleanup_expired_pending_bookings_task():
     """
-    Delete expired AI assistant pending booking drafts.
-    These are not real bookings and do not reserve seats.
+    Delete expired AI assistant pending booking drafts (markers only — the
+    draft content itself lives in booking_graph's own checkpoint and is
+    left behind; only the PendingBookingThread row that points at it is
+    cleaned up here). These are not real bookings and do not reserve seats.
     """
-    from ai_assistant.models import PendingBooking
-    
-    deleted_count, _ = PendingBooking.objects.filter(
+    from ai_assistant.models import PendingBookingThread
+
+    deleted_count, _ = PendingBookingThread.objects.filter(
         expires_at__lte=timezone.now()
     ).delete()
     
@@ -199,31 +203,6 @@ def  cleanup_expired_pending_cancellations_task():
         "expired_pending_cancellations_cleaned",
         extra={
             "event": "expired_pending_cancellations_cleaned",
-            "deleted_count": deleted_count,
-        }
-    )
-    
-    return deleted_count
-
-
-@shared_task
-def cleanup_expired_pending_payment_retries_task():
-    """
-    Delete expired AI assistant staged payment retries.
-    The underlying booking is untouched — only the staged retry expires.
-    """
-    from ai_assistant.models import PendingPaymentRetry
-    
-    deleted_count, _ = (
-        PendingPaymentRetry.objects
-        .filter(expires_at__lte=timezone.now())
-        .delete()
-    )
-    
-    logger.info(
-        "expired_pending_payment_retries_cleaned",
-        extra={
-            "event": "expired_pending_payment_retries_cleaned",
             "deleted_count": deleted_count,
         }
     )

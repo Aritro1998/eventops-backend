@@ -339,8 +339,8 @@ class EventService:
         """
         Presentation-only summary of a set of seat_numbers on an event —
         never used for identity/lookup (that's still plain seat_number
-        everywhere else: PendingBooking.seat_numbers, BookingSeat, AI tool
-        args). Used wherever a booking/draft needs to be *shown* to a
+        everywhere else: booking_graph's own checkpoint state, BookingSeat,
+        AI tool args). Used wherever a booking/draft needs to be *shown* to a
         user or the AI: general admission has no meaningful individual
         seat identity, so only a count is returned; labeled events return
         each seat's display_label (e.g. "A5"), falling back to the raw

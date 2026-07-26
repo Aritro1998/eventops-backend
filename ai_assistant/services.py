@@ -1,10 +1,10 @@
 """
 The AI assistant's core: builds the system prompt (get_system_prompt) and
-runs the OpenAI tool-calling loop (AIAssistantService). This is where the
-model's tools (ai_assistant/tools/) actually get invoked, and where the
-"propose vs execute" safety rules from ai_assistant/models.py get
-reinforced in plain English so the model doesn't claim an action happened
-that it didn't actually call a tool for.
+runs the LangChain/LangGraph tool-calling loop (run_turn/chat_stream). This
+is where the model's tools (ai_assistant/langchain_tools/) actually get
+invoked, and where the "propose vs execute" safety rules from
+ai_assistant/models.py get reinforced in plain English so the model doesn't
+claim an action happened that it didn't actually call a tool for.
 
 MAX_TOOL_CALLS bounds one turn's tool-calling loop — if the model somehow
 never settles on a plain-text answer within that many rounds (a runaway
@@ -15,23 +15,48 @@ instead of hanging or looping forever.
 import json
 import logging
 import tiktoken
-from openai import AsyncOpenAI
-from django.utils import timezone
+
 from asgiref.sync import sync_to_async
+from django.utils import timezone
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import ToolMessage
 
 from events.models import Event
-from events.services import EventService
 from ai_assistant.chat_state import ChatState
-from ai_assistant.tools.registry import TOOL_REGISTRY
-from ai_assistant.models import PendingBooking, UsageLog
+from ai_assistant.models import UsageLog
+from ai_assistant.langchain_tools.memory import build_message_list
 from core.settings.base import OPENAI_API_KEY, OPENAI_CHAT_MODEL
 from ai_assistant.actions.booking_actions import get_pending_booking_draft
 from ai_assistant.actions.payment_actions import get_pending_payment_retry_draft
 from ai_assistant.actions.cancellation_actions import get_pending_cancellation_draft
 
+from ai_assistant.langchain_tools.event_tools import (
+    get_all_events, search_events, get_event_detail, get_available_seats,
+)
+from ai_assistant.langchain_tools.booking_tools import (
+    get_my_bookings, prepare_booking, prepare_payment_retry, prepare_cancel_booking,
+)
+from ai_assistant.langchain_tools.knowledge_tools import search_knowledge_base
+
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_CALLS = 5
+
+# One entry per tool the model is allowed to call. "tool" is the actual
+# callable. The other keys describe values that must be supplied by this
+# file, never by the model: a logged-in user, the shared conversation
+# state, and the conversation's id.
+TOOL_REGISTRY = {
+    "get_all_events": {"tool": get_all_events},
+    "search_events": {"tool": search_events, "requires_chat_state": True, "requires_conversation_id": True},
+    "get_event_detail": {"tool": get_event_detail, "requires_chat_state": True},
+    "get_available_seats": {"tool": get_available_seats, "requires_chat_state": True, "requires_conversation_id": True},
+    "get_my_bookings": {"tool": get_my_bookings, "requires_auth": True},
+    "prepare_booking": {"tool": prepare_booking, "requires_auth": True, "requires_chat_state": True, "requires_conversation_id": True},
+    "prepare_payment_retry": {"tool": prepare_payment_retry, "requires_auth": True},
+    "prepare_cancel_booking": {"tool": prepare_cancel_booking, "requires_auth": True},
+    "search_knowledge_base": {"tool": search_knowledge_base, "requires_chat_state": True},
+}
 
 
 async def get_system_prompt(user=None, request=None, chat_state=None):
@@ -54,26 +79,15 @@ async def get_system_prompt(user=None, request=None, chat_state=None):
         user_info = "Current user is not authenticated."
 
     if user and user.is_authenticated:
-        # select_related('event') so pending_booking.event below doesn't
-        # trigger a lazy load — that lazy access would happen in this async
-        # function's own context (not inside a sync_to_async wrapper), so
-        # it would crash instead of just costing an extra query.
-        pending_booking = await PendingBooking.objects.filter(user=user).select_related('event').afirst()
-        if pending_booking and pending_booking.is_expired:
-            await pending_booking.adelete()  # Delete the expired pending booking
-            pending_booking = None
+        pending_booking = await get_pending_booking_draft(user)
     else:
         pending_booking = None
 
     if pending_booking:
-        # describe_seats is shared with sync callers elsewhere (confirm/cancel,
-        # the AI tools) so it stays sync itself — wrapped here rather than
-        # converted natively.
-        seat_display = await sync_to_async(EventService.describe_seats)(pending_booking.event, pending_booking.seat_numbers)
         seats_text = (
-            f"{seat_display['seat_count']} ticket(s), general admission (no specific seats)"
-            if seat_display["is_general_admission"]
-            else ", ".join(seat_display["seat_labels"])
+            f"{pending_booking['seat_count']} ticket(s), general admission (no specific seats)"
+            if pending_booking["is_general_admission"]
+            else ", ".join(pending_booking["seat_labels"])
         )
         pending_booking_info = f"""
             There is an existing pending booking draft. The interface displays
@@ -95,10 +109,10 @@ async def get_system_prompt(user=None, request=None, chat_state=None):
                 the server-side selected event. Do not call prepare_booking until it succeeds.
 
             Pending booking details:
-            - Event ID: {pending_booking.event.id}
-            - Event Name: {pending_booking.event.name}
+            - Event ID: {pending_booking['event_id']}
+            - Event Name: {pending_booking['event_name']}
             - Seats: {seats_text}
-            - Amount: {pending_booking.amount}
+            - Amount: {pending_booking['amount']}
         """
     else:
         pending_booking_info = ""
@@ -120,9 +134,9 @@ async def get_system_prompt(user=None, request=None, chat_state=None):
     system_prompt = f"""
         You are an assistant for EventOps platform.
         Answer user queries about events, bookings, and payments in a helpful and concise manner.
-        Only provide information that is relevant to the user's query. 
+        Only provide information that is relevant to the user's query.
         If you don't know the answer, say you don't know instead of making something up.
-        
+
         When showing more than one item (multiple bookings, multiple events, or
         search results), always format them as a Markdown table — one row per
         item, with columns for the fields relevant to that data (e.g. Event, Seat,
@@ -143,11 +157,11 @@ async def get_system_prompt(user=None, request=None, chat_state=None):
         are no individual seats to name. If false, use seat_labels (e.g.
         "A1, A2"), not raw seat numbers.
 
-        When a user refers to an event by name rather than id, use the available tools to discover the event id. 
+        When a user refers to an event by name rather than id, use the available tools to discover the event id.
         Do not ask the user for internal ids if they can be found using tools.
-        Always use available tools to retrieve the correct identifier before performing actions or 
+        Always use available tools to retrieve the correct identifier before performing actions or
         answering questions that depend on those identifiers.
-        
+
         When the user asks about policies, rules, refunds, prohibited items,
         accessibility, parking, or anything venue/event-specific that you don't
         already know from a prior tool result, call search_knowledge_base with
@@ -178,10 +192,11 @@ async def get_system_prompt(user=None, request=None, chat_state=None):
         ones you'd like (e.g. 'A1, B4')." This holds even if the user
         explicitly asks you to "show", "list", or "print" the seats, or to
         show them "again" - never a list, a table, bullet points, or a
-        seat count in that case either. The user already sees every
-        seat's real-time status in the visual map; your only job here is
-        to point them at it. Never show or ask for seat_number — it's an
-        internal id.
+        seat count in that case either. get_available_seats does not give
+        you individual seat labels at all for these events (only a count) -
+        the user already sees every seat's real-time status in the visual
+        map; your only job here is to point them at it. Never show or ask
+        for seat_number — it's an internal id.
         Always call get_available_seats again before telling the user which
         seats are available or accepting seat labels/quantity for a new booking,
         even if you already showed this earlier in this conversation.
@@ -193,9 +208,12 @@ async def get_system_prompt(user=None, request=None, chat_state=None):
         2. Use get_available_seats (see the mandatory reply rule above for
         how to present whatever it returns).
         3. For labeled events, ask which seats they want and pass seat_labels
-        to prepare_booking — the exact label strings from get_available_seats
-        (e.g. ["A1", "B4"]), never a seat_number, and never a label you have
-        not actually seen returned by get_available_seats in this conversation.
+        to prepare_booking exactly as the user typed them (e.g. ["A1", "B4"]),
+        never a seat_number. You are never shown the individual seat labels
+        yourself — get_available_seats only reports a count, never a list —
+        so relay whatever labels the user gives you straight through;
+        prepare_booking validates each one against the real seat map and
+        will return an error for anything invalid or no longer free.
         For general admission events, ask how many tickets they want and pass
         quantity to prepare_booking.
         4. Call prepare_booking.
@@ -280,277 +298,185 @@ async def get_system_prompt(user=None, request=None, chat_state=None):
     return system_prompt
 
 
-class AIAssistantService:
+async def _run_tool(tool_name, args, user, conversation_id, chat_state):
     """
-    Wraps the OpenAI client and runs the tool-calling conversation loop.
-    chat_stream is the sole entry point — it's what the real frontend
-    (gradio_app.py) actually calls, reassembling tool-call fragments that
-    arrive across many streamed chunks. A non-streaming chat() variant
-    used to exist alongside it but was removed as unused.
+    Execute a single tool call requested by the model.
+
+    Looks the tool up by name, checks whether it needs a logged-in user,
+    adds whichever server-side values that specific tool needs on top of
+    the arguments the model provided, then runs it and turns any failure
+    into a plain error dict instead of letting an exception escape.
     """
+    tool_config = TOOL_REGISTRY.get(tool_name)
+    if not tool_config:
+        return {"error": "Tool not found"}
 
-    def __init__(self):
-        self.client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    require_auth = tool_config.get("requires_auth", False)
+    if require_auth and not user.is_authenticated:
+        return {"error": "Authentication required"}
 
-    async def _run_tool(self, tool_name, args, user, request, conversation_id, chat_state):
-        """Execute one tool call, shared by every tool_calls round within
-        chat_stream's loop so the auth/kwargs/error-handling rules live in
-        exactly one place.
-        """
-        tool_config = TOOL_REGISTRY.get(tool_name)
+    # Start from what the model provided, then add whichever server-side
+    # values this particular tool declares that it needs.
+    tool_input = dict(args)
+    if require_auth:
+        tool_input["user"] = user
+    if tool_config.get("requires_chat_state"):
+        tool_input["chat_state"] = chat_state
+    if tool_config.get("requires_conversation_id"):
+        tool_input["conversation_id"] = conversation_id
 
-        if not tool_config:
-            return {"error": "Tool not found"}
+    try:
+        # The tool runs ordinary Django ORM code, which is synchronous,
+        # so this hands it off to a worker thread instead of blocking
+        # the event loop.
+        return await sync_to_async(tool_config["tool"].invoke)(tool_input)
+    except ValueError as e:
+        # A tool raises ValueError on purpose for an ordinary rejection
+        # (e.g. "seat already booked") - expected, not a bug, so it's
+        # just handed back as a normal error result.
+        return {"error": str(e)}
+    except Exception as e:
+        # Anything else is unexpected and worth a full log entry.
+        logger.exception("ai_tool_call_failed", extra={"event": "ai_tool_call_failed", "tool_name": tool_name})
+        return {"error": str(e)}
 
-        require_auth = tool_config.get("requires_auth", False)
-        if require_auth and not user.is_authenticated:
-            return {"error": "Authentication required"}
 
-        kwargs = dict(args)
-        if require_auth:
-            kwargs["user"] = user
-        if tool_config.get("requires_request"):
-            kwargs["request"] = request
-        if tool_config.get("requires_chat_state"):
-            kwargs["conversation_id"] = conversation_id
-            kwargs["chat_state"] = chat_state
+async def run_turn(user_prompt, user=None, conversation_id=None, chat_state=None, tool_call_log=None):
+    """
+    Run one full conversation turn: send the user's message and
+    conversation history to the model, execute whatever tools it asks
+    for, keep going until it settles on a plain-text answer, and stream
+    the pieces of that answer back as they arrive.
+    """
+    # Build the instructions the model always sees, and measure how many
+    # tokens that costs - useful for tracking spend over time.
+    system_prompt = await get_system_prompt(user=user, request=None, chat_state=chat_state)
+    system_prompt_tokens = len(tiktoken.encoding_for_model(OPENAI_CHAT_MODEL).encode(system_prompt))
 
-        tool_function = tool_config["function"]
+    # Turn the stored conversation history plus this new message into
+    # the actual list of messages the model is shown.
+    messages = build_message_list(system_prompt, chat_state["history"], user_prompt)
 
-        try:
-            tool_result = await sync_to_async(tool_function)(**kwargs)
-        except ValueError as e:
-            tool_result = {"error": str(e)}
-        except Exception as e:
-            logger.exception(
-                "ai_tool_call_failed",
-                extra={"event": "ai_tool_call_failed", "tool_name": tool_name}
+    llm = ChatOpenAI(model=OPENAI_CHAT_MODEL, api_key=OPENAI_API_KEY, temperature=0)
+    all_tools = [cfg["tool"] for cfg in TOOL_REGISTRY.values()]
+    # Keeping the model to one tool call at a time means each round of
+    # the loop below only ever has a single tool call to handle.
+    llm_with_tools = llm.bind_tools(all_tools, parallel_tool_calls=False)
+
+    full_text = ""
+
+    for _ in range(MAX_TOOL_CALLS):
+        full_response = None
+
+        # Stream the model's reply piece by piece, forwarding each piece
+        # of text immediately. Every incoming chunk is also merged into
+        # full_response, so once streaming finishes full_response holds
+        # the complete reply - its full text, and any tool calls the
+        # model decided to make.
+        async for chunk in llm_with_tools.astream(messages):
+            if chunk.content:
+                full_text += chunk.content
+                yield {"type": "chunk", "content": chunk.content}
+            full_response = chunk if full_response is None else full_response + chunk
+
+        # Add the model's turn to the running conversation so the next
+        # round, if there is one, has the full picture.
+        messages.append(full_response)
+
+        # Record how many tokens this round of the conversation cost.
+        usage = full_response.usage_metadata
+        tool_called = full_response.tool_calls[0]["name"] if full_response.tool_calls else None
+        if usage is not None:
+            await UsageLog.objects.acreate(
+                conversation_id=conversation_id,
+                user=user if user and user.is_authenticated else None,
+                model=OPENAI_CHAT_MODEL,
+                prompt_tokens=usage["input_tokens"],
+                completion_tokens=usage["output_tokens"],
+                total_tokens=usage["total_tokens"],
+                system_prompt_tokens=system_prompt_tokens,
+                tool_called=tool_called,
             )
-            tool_result = {"error": str(e)}
 
-        return tool_result
+        if not full_response.tool_calls:
+            # The model gave a plain-text answer instead of calling a
+            # tool - this turn is finished. Store the user's message and
+            # the model's reply so they're part of the history for
+            # future turns.
+            ChatState.add_turn(chat_state, "user", user_prompt)
+            ChatState.add_turn(chat_state, "assistant", full_text)
+            await sync_to_async(ChatState.save)(conversation_id, chat_state)
 
-    async def chat_stream(self, user_prompt, user=None, request=None, conversation_id=None, chat_state=None, tool_call_log=None):
-        """
-        Conversation loop that yields pieces as they arrive instead of returning one finished answer.
-        """
-        system_prompt = await get_system_prompt(
-            user=user,
-            request=request,
-            chat_state=chat_state,
-        )
-        
-        system_prompt_tokens = len(
-            tiktoken.encoding_for_model(OPENAI_CHAT_MODEL).encode(system_prompt)
-        )
-        
-        messages = [
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            *chat_state["history"],
-            {"role": "user", "content": user_prompt},
-        ]
-        
-        tools = [tool_config["schema"] for tool_config in TOOL_REGISTRY.values()]
+            # Look up anything currently awaiting the user's
+            # confirmation, so the frontend knows which controls to show.
+            if user and user.is_authenticated:
+                booking = await get_pending_booking_draft(user)
+                cancellation = await get_pending_cancellation_draft(user)
+                payment_retry = await get_pending_payment_retry_draft(user)
+            else:
+                booking = cancellation = payment_retry = None
 
-        full_text = ""
-        
-        for _ in range(MAX_TOOL_CALLS):
-            try:
-                stream = await self.client.chat.completions.create(
-                    model=OPENAI_CHAT_MODEL,
-                    messages=messages,
-                    temperature=0,
-                    tools=tools,
-                    parallel_tool_calls=False,
-                    stream=True,
-                    stream_options={"include_usage": True},
+            # Work out whether the frontend should open a live seat map
+            # for whichever event is currently selected. General
+            # admission events have no individual seats to pick, so no
+            # seat map is needed for those.
+            selected_event_id = chat_state.get("selected_event_id")
+            show_seat_picker = False
+            if selected_event_id:
+                selected_event = await (
+                    Event.objects
+                    .filter(id=selected_event_id)
+                    .select_related("space")
+                    .afirst()
                 )
-            except Exception:
-                logger.exception("openai_call_failed")
-                raise
-            
-            content_buffer = ""
-            # Tool-call fragments arrive by index (0, 1, ...) across many
-            # chunks — id/name/arguments each get built up piece by piece.
-            tool_calls_by_index = {}
-            # Populated only by the final chunk below - stays None if a
-            # stream somehow ends without ever sending it.
-            usage = None
-            
-            async for chunk in stream:
-                
-                if not chunk.choices:
-                    # stream_options={"include_usage": True} adds exactly one
-                    # extra chunk at the very end whose choices list is empty
-                    # and which carries only .usage - not a normal content or
-                    # tool-call chunk. chunk.choices[0] on THIS chunk raises
-                    # IndexError, so it must be caught before the unguarded
-                    # access on the next line.
-                    usage = chunk.usage
-                    continue
-                
-                delta = chunk.choices[0].delta
-                
-                if delta.content:
-                    content_buffer += delta.content
-                    full_text += delta.content
-                    # This is the actual "streaming" moment — hand this
-                    # fragment to the view immediately, don't wait.
-                    yield {"type": "chunk", "content": delta.content}
-                    
-                if delta.tool_calls:
-                    for tc_delta in delta.tool_calls:
-                        entry = tool_calls_by_index.setdefault(
-                            tc_delta.index,
-                            {"id": None, "name": "", "arguments": ""}
-                        )
-                        
-                        if tc_delta.id:
-                            entry["id"] = tc_delta.id
-                        if tc_delta.function and tc_delta.function.name:
-                            entry["name"] += tc_delta.function.name
-                        if tc_delta.function and tc_delta.function.arguments:
-                            entry["arguments"] += tc_delta.function.arguments
-            
-            if usage is not None:
-                tool_called = next(
-                    (entry["name"] for entry in tool_calls_by_index.values()),
-                    None,
-                )
-                
-                await UsageLog.objects.acreate(
-                    conversation_id=conversation_id,
-                    user=user if user and user.is_authenticated else None,
-                    model=OPENAI_CHAT_MODEL,
-                    prompt_tokens=usage.prompt_tokens,
-                    completion_tokens=usage.completion_tokens,
-                    total_tokens=usage.total_tokens,
-                    system_prompt_tokens=system_prompt_tokens,
-                    tool_called=tool_called,
-                )
-            
-            if not tool_calls_by_index:
-                # Plain-text answer — every piece was already streamed above.
-                # This is just the wrap-up: save history, report what to show.
-                ChatState.add_turn(chat_state, "user", user_prompt)
-                ChatState.add_turn(chat_state, "assistant", full_text)
-                await sync_to_async(ChatState.save)(conversation_id, chat_state)
+                show_seat_picker = bool(selected_event) and not selected_event.is_general_admission
 
-                # Always reflects whatever is actually in the database right
-                # now — same rule "actions" already follows — not gated on
-                # whether this exact turn's tool call happened to run.
-                # Guarded by is_authenticated: PendingBooking.user is a
-                # required FK, and an anonymous request's user is
-                # AnonymousUser (not None), which crashes the lookup.
-                if user and user.is_authenticated:
-                    draft = await get_pending_booking_draft(user)
-                    cancellation = await get_pending_cancellation_draft(user)
-                    payment_retry = await get_pending_payment_retry_draft(user)
-                else:
-                    draft = cancellation = payment_retry = None
+            yield {
+                "type": "done",
+                "draft": booking,
+                "cancellation": cancellation,
+                "payment_retry": payment_retry,
+                "seat_picker_event_id": selected_event_id if show_seat_picker else None,
+            }
+            return
 
-                # Tells the frontend which event's live seat picker (if
-                # any) to show right now. Only meaningful for labeled
-                # (non-general-admission) events - general admission has
-                # no individual seats to pick, so the frontend shouldn't
-                # open a seat-picker connection for one. Field name must
-                # match what gradio_app.py's get_ai_response reads.
-                selected_event_id = chat_state.get("selected_event_id")
-                show_seat_picker = False
-                if selected_event_id:
-                    # select_related('space') so is_general_admission's
-                    # internal self.space access below doesn't trigger a
-                    # lazy load in this async function's own context.
-                    selected_event = await Event.objects.filter(id=selected_event_id).select_related('space').afirst()
-                    show_seat_picker = bool(selected_event) and not selected_event.is_general_admission
+        # The model asked for a tool - run it, note the call in the
+        # tool call log, and feed the result back into the conversation
+        # as a tool message so the next round can use it.
+        for call in full_response.tool_calls:
+            result = await _run_tool(call["name"], call["args"], user, conversation_id, chat_state)
 
-                yield {
-                    "type": "done",
-                    "draft": draft,
-                    "cancellation": cancellation,
-                    "payment_retry": payment_retry,
-                    "seat_picker_event_id": selected_event_id if show_seat_picker else None,
-                }
-                return
-            
-            # Otherwise, one or more tools were requested. Rebuild the
-            # assistant message OpenAI expects to see next, then run the tools
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": content_buffer or None,
-                    "tool_calls": [
-                        {
-                            "id": entry["id"],
-                            "type": "function",
-                            "function": {
-                                "name": entry["name"],
-                                "arguments": entry["arguments"]
-                            }
-                        }
-                        for entry in tool_calls_by_index.values()
-                    ]
-                }
-            )
-            
-            for entry in tool_calls_by_index.values():
-                # entry["arguments"] is streamed text reassembled from many
-                # chunks — a truncated/malformed stream can leave it as
-                # invalid JSON. Unlike _run_tool's own ValueError handling
-                # below, this used to be unguarded and would raise straight
-                # out of this async generator, losing the whole turn instead
-                # of letting the model see the failure and retry.
-                try:
-                    args = json.loads(entry["arguments"])
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "ai_tool_call_args_invalid_json",
-                        extra={
-                            "event": "ai_tool_call_args_invalid_json",
-                            "tool_name": entry["name"],
-                        }
-                    )
-                    if tool_call_log is not None:
-                        tool_call_log.append({"tool": entry["name"], "args": None})
+            if tool_call_log is not None:
+                tool_call_log.append({"tool": call["name"], "args": call["args"]})
 
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": entry["id"],
-                            "content": json.dumps({
-                                "error": "Arguments were not valid JSON — please retry this tool call."
-                            })
-                        }
-                    )
-                    continue
+            messages.append(ToolMessage(content=json.dumps(result), tool_call_id=call["id"]))
 
-                tool_result = await self._run_tool(
-                    entry["name"],
-                    args,
-                    user,
-                    request,
-                    conversation_id,
-                    chat_state
-                )
+            # Some tools update the shared conversation state and save
+            # it themselves, but the copy this loop is holding never
+            # sees that update automatically - reload it from storage so
+            # the next tool call in this turn works with the latest state.
+            if TOOL_REGISTRY.get(call["name"], {}).get("requires_chat_state"):
+                _, chat_state = await sync_to_async(ChatState.get)(conversation_id, user)
 
-                if tool_call_log is not None:
-                    tool_call_log.append({"tool": entry["name"], "args": args})
+    # Ran out of rounds without the model settling on a plain-text answer.
+    fallback_message = "[MAX_TOOL_CALLS_EXCEEDED] Sorry, I was unable to complete that request."
+    yield {"type": "chunk", "content": fallback_message}
+    yield {"type": "done", "draft": None, "cancellation": None, "payment_retry": None}
 
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": entry["id"],
-                        "content": json.dumps(tool_result)
-                    }
-                )
 
-        # Ran out of tool-call rounds without a plain-text answer.
-        fallback_message = (
-            "[MAX_TOOL_CALLS_EXCEEDED] Sorry, I unfortunately I was unable to "
-            "complete that request. Please try again later."
-        )
-        yield {"type": "chunk", "content": fallback_message}
-        yield {"type": "done", "draft": None, "cancellation": None, "payment_retry": None}
+async def chat_stream(user_prompt, user=None, request=None, conversation_id=None, chat_state=None, tool_call_log=None):
+    """
+    The sole chat entry point — it's what the real frontend (gradio_app.py)
+    actually calls via ChatStreamView, reassembling streamed chunks and
+    tool calls into one conversation turn. request is accepted but never
+    used here (kept so callers with a request object don't need a special
+    case to call this).
+    """
+    async for event in run_turn(
+        user_prompt,
+        user=user,
+        conversation_id=conversation_id,
+        chat_state=chat_state,
+        tool_call_log=tool_call_log,
+    ):
+        yield event
