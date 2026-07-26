@@ -2,8 +2,9 @@ from django.contrib import admin
 from django.db.models import Sum, Count
 from django.db.models.functions import TruncDate
 from ai_assistant.models import (
-    PendingBooking, 
-    PendingBookingCancellation, 
+    PendingBooking,
+    PendingBookingThread,
+    PendingBookingCancellation,
     PendingPaymentRetry,
     UsageLog,
 )
@@ -20,6 +21,16 @@ class PendingBookingAdmin(admin.ModelAdmin):
     list_display_links = ["id", "user", "event"]
 
 
+@admin.register(PendingBookingThread)
+class PendingBookingThreadAdmin(admin.ModelAdmin):
+    """The graph-based flow's version of PendingBookingAdmin above - a
+    marker pointing at a paused booking_graph thread, not the draft
+    content itself (that lives in the checkpoint tables)."""
+    list_display = ["id", "user", "conversation_id", "created_at", "expires_at"]
+    search_fields = ["user__username", "conversation_id"]
+    list_display_links = ["id", "user"]
+
+
 @admin.register(PendingBookingCancellation)
 class PendingBookingCancellationAdmin(admin.ModelAdmin):
     list_display = ["id", "user", "booking", "created_at", "expires_at"]
@@ -32,8 +43,8 @@ class PendingPaymentRetryAdmin(admin.ModelAdmin):
     list_display = ["id", "user", "booking", "created_at", "expires_at"]
     search_fields = ["user__username", "booking__id"]
     list_display_links = ["id", "user", "booking"]
-    
-    
+
+
 @admin.register(UsageLog)
 class UsageLogAdmin(admin.ModelAdmin):
     """

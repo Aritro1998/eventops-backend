@@ -42,7 +42,7 @@ class PendingActionBase(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='%(class)s_user')
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(db_index=True, default=get_pending_action_expiry)
-    
+
     @property
     def is_expired(self):
         return timezone.now() >= self.expires_at
@@ -61,7 +61,7 @@ class PendingBooking(PendingActionBase):
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="pending_booking_event")
     seat_numbers = models.JSONField(default=list)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
-    
+
     @classmethod
     def for_user(cls, user):
         """Every Pending* model repeats this same one-row-per-user lookup
@@ -76,11 +76,32 @@ class PendingBooking(PendingActionBase):
         return await cls.objects.select_related("event").filter(user=user).afirst()
 
 
+class PendingBookingThread(PendingActionBase):
+    """
+    Marker only — unlike PendingBooking, the actual draft content (event,
+    seats, amount) lives in booking_graph's own checkpoint, keyed by
+    conversation_id, not here. A LangGraph checkpoint can only be looked
+    up if you already know its thread_id; there's no "find this user's
+    paused thread" query against the checkpoint store. This row exists
+    purely so that lookup stays possible: "does this user have an active
+    draft, and which conversation is it on."
+    """
+    conversation_id = models.CharField(max_length=255)
+
+    @classmethod
+    def for_user(cls, user):
+        return cls.objects.filter(user=user).first()
+
+    @classmethod
+    async def afor_user(cls, user):
+        return await cls.objects.filter(user=user).afirst()
+
+
 class PendingBookingCancellation(PendingActionBase):
     """Staged by ai_assistant/tools/booking_tools.py's prepare_cancel_booking.
     Points at an existing, already-CONFIRMED Booking — confirming this
     draft is what actually flips it to CANCELLED."""
-    
+
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='pending_cancellations')
 
     @classmethod
@@ -92,7 +113,7 @@ class PendingBookingCancellation(PendingActionBase):
             .filter(user=user)
             .first()
         )
-        
+
     @classmethod
     async def afor_user(cls, user):
         return await (
@@ -108,7 +129,7 @@ class PendingPaymentRetry(PendingActionBase):
     """Staged by ai_assistant/tools/booking_tools.py's prepare_payment_retry.
     Points at a FAILED/PENDING Booking — confirming this draft is what
     actually calls PaymentService.process_payment again."""
-    
+
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="pending_payment_retries")
 
     @classmethod
@@ -120,7 +141,7 @@ class PendingPaymentRetry(PendingActionBase):
             .filter(user=user)
             .first()
         )
-        
+
     @classmethod
     async def afor_user(cls, user):
         return await (
@@ -136,7 +157,7 @@ class UsageLog(models.Model):
     """
     One row per OpenAI API call (not per user turn - see chat_stream in
     ai_assistant/services.py, which can make up to MAX_TOOL_CALLS calls
-    for a single user message, each logged separately here). 
+    for a single user message, each logged separately here).
     """
     conversation_id = models.CharField(max_length=255, db_index=True)
     # SET_NULL, not CASCADE - a deleted user's usage history is still real
@@ -150,10 +171,10 @@ class UsageLog(models.Model):
     system_prompt_tokens = models.IntegerField(null=True, blank=True)
     tool_called = models.CharField(max_length=100, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    
+
     class Meta:
         indexes = [
             models.Index(fields=['user']),
             models.Index(fields=['created_at'])
         ]
-    
+

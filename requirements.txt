@@ -35,3 +35,10 @@ gradio==5.31.0
 huggingface_hub>=0.28.1,<1.0
 langchain-core>=0.3,<0.4
 langchain-openai>=0.3,<0.4
+langgraph>=0.2,<0.3
+# Postgres-backed checkpointer for the booking graph specifically -
+# requires psycopg (v3), a separate driver from psycopg2-binary above,
+# which the rest of the app (Django's ORM) uses and keeps using.
+langgraph-checkpoint-postgres==2.0.25
+psycopg[binary]>=3.2.0,<4.0.0
+psycopg-pool>=3.2.0,<4.0.0
