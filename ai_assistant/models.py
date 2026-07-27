@@ -13,8 +13,8 @@ produce a confusing chat message, but it can never produce a wrong
 database write. That guarantee has held up through everything found and
 fixed in this project's testing so far.
 
-PendingBookingThread and PendingBookingCancellation both expire
-(get_pending_action_expiry below), and workflows/tasks.py's
+PendingBookingThread, PendingBookingCancellation, and PendingPaymentRetry
+all expire (get_pending_action_expiry below), and workflows/tasks.py's
 cleanup_expired_* Celery tasks garbage-collect stale ones periodically —
 an unconfirmed draft doesn't linger forever.
 """
@@ -37,8 +37,9 @@ def get_pending_action_expiry():
 class PendingActionBase(models.Model):
     """
     Shared shape for every "AI staged this, a human must confirm it" row —
-    PendingBookingThread and PendingBookingCancellation both need identical
-    expiry tracking, just against different underlying data.
+    PendingBookingThread, PendingBookingCancellation, and
+    PendingPaymentRetry all need identical expiry tracking, just against
+    different underlying data.
     """
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='%(class)s_user')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -100,6 +101,31 @@ class PendingBookingCancellation(PendingActionBase):
             .filter(user=user)
             .afirst()
         )
+
+
+class PendingPaymentRetry(PendingActionBase):
+    """
+    Marker only, same role as PendingBookingCancellation for
+    cancel_booking_graph - the actual retry state lives in
+    payment_retry_graph's own checkpoint, keyed by booking_id. Without
+    this, every read (actions/draft) and write (confirm/dismiss) had to
+    independently guess "which booking" via
+    Booking.objects.filter(status="FAILED").order_by("-created_at").first()
+    - fine with one failed booking, wrong the moment a user has two: the
+    guess and whatever prepare_payment_retry actually staged could
+    silently disagree. update_or_create keeps this pointed at whichever
+    booking is currently relevant - the last one either explicitly staged
+    via chat or auto-staged the instant a fresh booking attempt fails.
+    """
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="pending_payment_retries")
+
+    @classmethod
+    def for_user(cls, user):
+        return cls.objects.select_related("booking__event").filter(user=user).first()
+
+    @classmethod
+    async def afor_user(cls, user):
+        return await cls.objects.select_related("booking__event").filter(user=user).afirst()
 
 
 class UsageLog(models.Model):

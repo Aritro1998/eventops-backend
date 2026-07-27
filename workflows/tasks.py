@@ -1,14 +1,15 @@
 """
 Celery task definitions. process_workflow_job is the actual worker for
 WorkflowJob rows (dispatches by job_type to the handle_* functions at the
-bottom of this file); the three *_task functions below it are what
+bottom of this file); the four *_task functions below it are what
 CELERY_BEAT_SCHEDULE (core/settings/base.py) fires every 5 minutes —
-requeue_pending_jobs_task recovers stuck WorkflowJobs, the two
+requeue_pending_jobs_task recovers stuck WorkflowJobs, the three
 cleanup_expired_* tasks garbage-collect the AI assistant's
-PendingBookingThread/PendingBookingCancellation rows that nobody confirmed
-in time. There is no equivalent cleanup for a stale payment-retry
-LangGraph checkpoint yet — a FAILED booking with an abandoned paused
-retry thread just sits there; see payment_retry_graph.py.
+PendingBookingThread/PendingBookingCancellation/PendingPaymentRetry rows
+that nobody confirmed in time. None of these delete the underlying
+LangGraph checkpoint itself (booking_graph/payment_retry_graph/
+cancel_booking_graph's own Postgres tables) - only the marker row that
+points at it; that's a known, separate gap, see checkpointer.py.
 """
 
 import logging
@@ -206,7 +207,33 @@ def  cleanup_expired_pending_cancellations_task():
             "deleted_count": deleted_count,
         }
     )
-    
+
+    return deleted_count
+
+
+@shared_task
+def cleanup_expired_pending_payment_retries_task():
+    """
+    Delete expired AI assistant payment-retry markers.
+    The underlying booking is untouched — only the marker pointing at the
+    paused retry thread expires; the FAILED booking itself stays FAILED.
+    """
+    from ai_assistant.models import PendingPaymentRetry
+
+    deleted_count, _ = (
+        PendingPaymentRetry.objects
+        .filter(expires_at__lte=timezone.now())
+        .delete()
+    )
+
+    logger.info(
+        "expired_pending_payment_retries_cleaned",
+        extra={
+            "event": "expired_pending_payment_retries_cleaned",
+            "deleted_count": deleted_count,
+        }
+    )
+
     return deleted_count
 
 

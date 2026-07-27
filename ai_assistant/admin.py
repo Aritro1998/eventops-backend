@@ -5,6 +5,7 @@ from knowledge.services import KnowledgeService
 from ai_assistant.models import (
     PendingBookingThread,
     PendingBookingCancellation,
+    PendingPaymentRetry,
     UsageLog,
 )
 
@@ -24,6 +25,15 @@ class PendingBookingThreadAdmin(admin.ModelAdmin):
 
 @admin.register(PendingBookingCancellation)
 class PendingBookingCancellationAdmin(admin.ModelAdmin):
+    list_display = ["id", "user", "booking", "created_at", "expires_at"]
+    search_fields = ["user__username", "booking__id"]
+    list_display_links = ["id", "user", "booking"]
+
+
+@admin.register(PendingPaymentRetry)
+class PendingPaymentRetryAdmin(admin.ModelAdmin):
+    """Marker pointing at a paused payment_retry_graph thread - the same
+    role PendingBookingCancellation plays for cancel_booking_graph."""
     list_display = ["id", "user", "booking", "created_at", "expires_at"]
     search_fields = ["user__username", "booking__id"]
     list_display_links = ["id", "user", "booking"]

@@ -13,7 +13,7 @@ from langgraph.types import Command
 from events.models import Event
 from events.services import EventService
 from payments.services import PaymentService
-from ai_assistant.models import PendingBookingThread
+from ai_assistant.models import PendingBookingThread, PendingPaymentRetry, get_pending_action_expiry
 from ai_assistant.langgraph_flows.booking_graph import get_booking_graph
 from ai_assistant.langgraph_flows.payment_retry_graph import get_payment_retry_graph
 
@@ -109,6 +109,15 @@ def confirm_pending_booking(user):
         retry_graph.invoke(
             {"booking_id": booking.id},
             config={"configurable": {"thread_id": f"booking-{booking.id}"}},
+        )
+        # This is the OTHER place (besides prepare_payment_retry) a retry
+        # can get staged - a booking failing right here needs the same
+        # marker update, or a user whose booking fails again while an
+        # older failed booking's retry is still pending would leave the
+        # marker stale, pointed at the wrong one.
+        PendingPaymentRetry.objects.update_or_create(
+            user=user,
+            defaults={"booking": booking, "expires_at": get_pending_action_expiry()},
         )
 
     return {

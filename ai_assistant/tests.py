@@ -10,7 +10,7 @@ from django.utils import timezone
 from events.models import Event, Seat
 from bookings.models import Booking, BookingSeat
 from langgraph.types import Command
-from ai_assistant.models import PendingBookingCancellation, get_pending_action_expiry
+from ai_assistant.models import PendingBookingCancellation, PendingPaymentRetry, get_pending_action_expiry
 from ai_assistant.langgraph_flows.booking_graph import get_booking_graph
 from ai_assistant.langgraph_flows.payment_retry_graph import get_payment_retry_graph
 from ai_assistant.langgraph_flows.cancel_booking_graph import get_cancel_booking_graph
@@ -213,6 +213,10 @@ class TestPaymentRetryGraph(TestCase):
         booking_id = self._make_failed_booking()
         config = {"configurable": {"thread_id": f"booking-{booking_id}"}}
         self.retry_graph.invoke({"booking_id": booking_id}, config=config)
+        booking = Booking.objects.get(id=booking_id)
+        PendingPaymentRetry.objects.update_or_create(
+            user=self.user, defaults={"booking": booking, "expires_at": get_pending_action_expiry()},
+        )
 
         self.assertTrue(get_pending_payment_retry_actions(self.user))
 
@@ -221,6 +225,82 @@ class TestPaymentRetryGraph(TestCase):
         self.assertEqual(get_pending_payment_retry_actions(self.user), [])
         with self.assertRaises(ValueError):
             confirm_payment_retry(self.user)
+
+
+class TestPaymentRetryActions(TestCase):
+    """Regression coverage for the PendingPaymentRetry marker: without it,
+    every retry action independently guessed "most recent FAILED
+    booking", which silently disagreed with whatever prepare_payment_retry
+    actually staged the moment a user had more than one failed booking at
+    once - found via manual reproduction (asked to retry an older
+    booking by name while a newer one had also failed; got the newer one
+    back instead), not a bug report."""
+
+    def setUp(self):
+        self.booking_graph = get_booking_graph()
+        self.retry_graph = get_payment_retry_graph()
+
+        self.user = User.objects.create_user(username="testuser5", email="t5@example.com", password="StrongPass@123")
+
+        self.event_a = Event.objects.create(
+            name="Oppenheimer Test", description="", price=100.00, total_seats=10,
+            start_time=timezone.now() + timedelta(hours=2),
+            end_time=timezone.now() + timedelta(hours=4),
+            created_by=self.user,
+        )
+        Seat.objects.create(event=self.event_a, seat_number=1)
+
+        self.event_b = Event.objects.create(
+            name="Pathaan Test", description="", price=100.00, total_seats=10,
+            start_time=timezone.now() + timedelta(hours=2),
+            end_time=timezone.now() + timedelta(hours=4),
+            created_by=self.user,
+        )
+        Seat.objects.create(event=self.event_b, seat_number=1)
+
+    def _make_failed_booking(self, event):
+        thread_id = str(uuid.uuid4())
+        config = {"configurable": {"thread_id": thread_id}}
+        with patch("payments.services.random.choice", return_value=False):
+            self.booking_graph.invoke(
+                {"conversation_id": thread_id, "draft_id": str(uuid.uuid4()), "user_id": self.user.id,
+                 "event_id": event.id, "seat_numbers": [1], "amount": "100.00"},
+                config=config,
+            )
+            result = self.booking_graph.invoke(Command(resume="confirm"), config=config)
+        self.assertEqual(result["result"]["status"], "FAILED")
+        return Booking.objects.get(id=result["result"]["booking_id"])
+
+    def _stage_retry(self, booking):
+        # Mirrors what both prepare_payment_retry and
+        # booking_actions.confirm_pending_booking's auto-stage do: pause
+        # that specific booking's retry graph and point the marker at it.
+        self.retry_graph.invoke(
+            {"booking_id": booking.id},
+            config={"configurable": {"thread_id": f"booking-{booking.id}"}},
+        )
+        PendingPaymentRetry.objects.update_or_create(
+            user=self.user,
+            defaults={"booking": booking, "expires_at": get_pending_action_expiry()},
+        )
+
+    def test_asking_about_the_older_failed_booking_resolves_to_it_not_the_newer_one(self):
+        older = self._make_failed_booking(self.event_a)  # Oppenheimer fails first
+        newer = self._make_failed_booking(self.event_b)  # Pathaan fails second, more recent
+
+        # Both auto-stage as they fail, in order - the marker is left
+        # pointed at Pathaan (most recent), same as
+        # booking_actions.confirm_pending_booking would leave it.
+        self._stage_retry(older)
+        self._stage_retry(newer)
+
+        # User then explicitly asks (by name) to retry the OLDER one -
+        # prepare_payment_retry re-points the marker back to it.
+        self._stage_retry(older)
+
+        result = confirm_payment_retry(self.user)
+        self.assertEqual(result["booking_id"], older.id)
+        self.assertNotEqual(result["booking_id"], newer.id)
 
 
 class TestCancelBookingGraph(TestCase):

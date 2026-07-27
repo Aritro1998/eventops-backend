@@ -20,7 +20,12 @@ from bookings.serializers import BookingReadSerializer
 from ai_assistant.langgraph_flows.booking_graph import get_booking_graph
 from ai_assistant.langgraph_flows.payment_retry_graph import get_payment_retry_graph
 from ai_assistant.langgraph_flows.cancel_booking_graph import get_cancel_booking_graph
-from ai_assistant.models import PendingBookingThread, get_pending_action_expiry, PendingBookingCancellation
+from ai_assistant.models import (
+    PendingBookingThread,
+    PendingPaymentRetry,
+    get_pending_action_expiry,
+    PendingBookingCancellation,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -86,6 +91,16 @@ def prepare_payment_retry(
     retry_graph.invoke(
         {"booking_id": booking.id},
         config={"configurable": {"thread_id": f"booking-{booking.id}"}},
+    )
+
+    # Marker only - re-points at whichever booking is actually being
+    # discussed right now. Without this, a user with more than one FAILED
+    # booking could ask to retry one and have the Retry Payment Now
+    # button silently resolve against a different, more recently failed
+    # one instead (see PendingPaymentRetry's own docstring).
+    PendingPaymentRetry.objects.update_or_create(
+        user=user,
+        defaults={"booking": booking, "expires_at": get_pending_action_expiry()},
     )
 
     return {
