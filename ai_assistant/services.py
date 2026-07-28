@@ -14,6 +14,7 @@ instead of hanging or looping forever.
 
 import json
 import logging
+import asyncio
 import tiktoken
 
 from asgiref.sync import sync_to_async
@@ -29,6 +30,11 @@ from core.settings.base import OPENAI_API_KEY, OPENAI_CHAT_MODEL
 from ai_assistant.actions.booking_actions import get_pending_booking_draft
 from ai_assistant.actions.payment_actions import get_pending_payment_retry_draft
 from ai_assistant.actions.cancellation_actions import get_pending_cancellation_draft
+from ai_assistant.langchain_tools.quick_actions import (
+    maybe_generate_quick_actions,
+    get_deterministic_quick_actions,
+    DEFAULT_QUICK_ACTIONS,
+)
 
 from ai_assistant.langchain_tools.event_tools import (
     get_all_events, search_events, get_event_detail, get_available_seats,
@@ -364,6 +370,28 @@ async def run_turn(user_prompt, user=None, conversation_id=None, chat_state=None
     llm_with_tools = llm.bind_tools(all_tools, parallel_tool_calls=False)
 
     full_text = ""
+    quick_actions_task = None
+    
+    if user and user.is_authenticated:
+        current_quick_actions = chat_state.get("quick_actions", DEFAULT_QUICK_ACTIONS)
+        # Computed up front, before the tool-calling loop, same as
+        # current_quick_actions above - only state true at the *start* of
+        # this turn is available yet, so this reflects e.g. an event
+        # selected on a previous turn, not one this turn's own tool call
+        # is about to select.
+        deterministic_quick_actions = await get_deterministic_quick_actions(chat_state, user)
+        # Call maybe_generate_quick_actions in the background,
+        # so it can run while the model is generating its response.
+        quick_actions_task = asyncio.create_task(
+            maybe_generate_quick_actions(
+                current_quick_actions,
+                chat_state,
+                user,
+                conversation_id,
+                user_prompt,
+                deterministic_actions=deterministic_quick_actions,
+            )
+        )
 
     for _ in range(MAX_TOOL_CALLS):
         full_response = None
@@ -430,6 +458,19 @@ async def run_turn(user_prompt, user=None, conversation_id=None, chat_state=None
                     .afirst()
                 )
                 show_seat_picker = bool(selected_event) and not selected_event.is_general_admission
+            
+            # Update the quick actions if the model decided they should be replaced, and
+            # wait for that to finish if it hasn't already. 
+            # If the model didn't ask for an update, or the update returned no new actions, just return None.     
+            quick_actions = None
+            if quick_actions_task is not None:
+                if quick_actions_task.done():
+                    quick_actions = quick_actions_task.result()
+                    if quick_actions:
+                        chat_state["quick_actions"] = quick_actions
+                        await sync_to_async(ChatState.save)(conversation_id, chat_state)
+                else:
+                    quick_actions_task.cancel()        
 
             yield {
                 "type": "done",
@@ -437,6 +478,7 @@ async def run_turn(user_prompt, user=None, conversation_id=None, chat_state=None
                 "cancellation": cancellation,
                 "payment_retry": payment_retry,
                 "seat_picker_event_id": selected_event_id if show_seat_picker else None,
+                "quick_actions": quick_actions,
             }
             return
 
@@ -459,6 +501,13 @@ async def run_turn(user_prompt, user=None, conversation_id=None, chat_state=None
                 _, chat_state = await sync_to_async(ChatState.get)(conversation_id, user)
 
     # Ran out of rounds without the model settling on a plain-text answer.
+    # The done branch above is what normally joins/cancels
+    # quick_actions_task - this fallback skips that entirely, so it has
+    # to handle the task itself or it's left running detached with
+    # nobody ever consuming its result or an exception it might raise.
+    if quick_actions_task is not None:
+        quick_actions_task.cancel()
+
     fallback_message = "[MAX_TOOL_CALLS_EXCEEDED] Sorry, I was unable to complete that request."
     yield {"type": "chunk", "content": fallback_message}
     yield {"type": "done", "draft": None, "cancellation": None, "payment_retry": None}

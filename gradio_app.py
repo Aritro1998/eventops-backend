@@ -71,14 +71,64 @@ WELCOME_MESSAGE = {
     "content": "Hi! I can help you discover events, compare prices, and manage bookings.",
 }
 
+# Must stay identical to ai_assistant/langchain_tools/quick_actions.py's
+# own DEFAULT_QUICK_ACTIONS — this frontend runs in a separate container
+# with no Django/LangChain deps, so it can't import that module directly
+# and keeps its own copy instead. Also what the four quick-action buttons
+# reset to on logout.
+DEFAULT_QUICK_ACTIONS = [
+    "Show me all events",
+    "What events are available this weekend?",
+    "Show me the 2 cheapest events",
+    "Show me my confirmed bookings",
+]
+
 BRAND_HEADER_HTML = (
     "<div class='brand-header'>"
-    "<div class='brand-mark'>E</div>"
-    "<div class='brand-text'><h1>EventOps</h1><p>Browse events with AI</p></div>"
+    # viewBox is cropped to the icon+text's actual drawn bounds (roughly
+    # x=15 to x=216 in the original 0-300 coordinate space - the text
+    # itself is only ~146 units wide starting at x=70), not the full
+    # 0-300 box the shapes/text below are still positioned in. The
+    # original 0-300 viewBox left ~28% of its own width as empty space
+    # on the right of "eventops", so centering the SVG's own bounding box
+    # in its container (which does work correctly) still visually looked
+    # left-of-center, since the visible content wasn't centered *within
+    # that box* to begin with.
+    "<svg viewBox='8 0 216 90' width='190' height='79' xmlns='http://www.w3.org/2000/svg' role='img' aria-label='eventops' style='width: 190px; max-width: 100%; height: auto;'>"
+    "<g fill='none' stroke='#1e515d' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'>"
+    "<rect x='15' y='25' width='42' height='42' rx='8' />"
+    "<line x1='25' y1='18' x2='25' y2='25' stroke-width='4' />"
+    "<line x1='47' y1='18' x2='47' y2='25' stroke-width='4' />"
+    "<line x1='15' y1='35' x2='57' y2='35' />"
+    "<path d='M 22 55 L 32 45 L 39 50 L 52 32' stroke-width='4' />"
+    "<polyline points='43 32 52 32 52 41' stroke-width='4' fill='none' />"
+    "</g>"
+    "<text x='70' y='58' font-family=\"-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif\" "
+    "font-weight='800' font-size='34' fill='#1e515d' letter-spacing='-0.5'>eventops</text>"
+    "</svg>"
     "</div>"
 )
 
 CUSTOM_CSS = """
+:root {
+    /* Brand tokens - see the eventops brand/color-scheme reference this
+       was matched against. Everything below just remaps Gradio's own
+       theme variables to these instead of touching every individual
+       rule that already reads var(--color-accent)/var(--body-text-color)/
+       etc. throughout this stylesheet (and the inline styles in the
+       render_*_card HTML helpers, which reference the same var() names). */
+    --primary-teal: #1e515d;
+    --primary-teal-hover: #143b44;
+    --quick-action-bg: #eaeffb;
+    --quick-action-hover: #dbe4f8;
+    --quick-action-text: #2d3748;
+    --bg-main: #f8f9fa;
+    --bg-card: #ffffff;
+    --border-color: #e2e8f0;
+    --text-primary: #1a202c;
+    --text-secondary: #718096;
+}
+
 .gradio-container {
     max-width: 100% !important;
     width: 100% !important;
@@ -86,6 +136,32 @@ CUSTOM_CSS = """
     padding: 24px 32px !important;
     font-size: 16px !important;
     box-sizing: border-box !important;
+    background: var(--bg-main) !important;
+    /* Remaps Gradio's own theme variables to the brand tokens above -
+       every existing rule in this stylesheet (and the inline
+       var(--color-accent) styles in the render_*_card HTML helpers)
+       already reads these Gradio variable names, so overriding them
+       here is what actually recolors the whole app instead of needing
+       a rule per element. */
+    --color-accent: var(--primary-teal);
+    --body-text-color: var(--text-primary);
+    --body-text-color-subdued: var(--text-secondary);
+    --border-color-primary: var(--border-color);
+    --background-fill-primary: var(--bg-card);
+    --background-fill-secondary: var(--bg-main);
+}
+
+/* Gradio's theme doesn't expose a separate "accent hover" variable, so
+   --color-accent above only recolors the resting state - this covers
+   the hover state explicitly for every primary-variant button (Send,
+   Log In, Create Account, Confirm booking, Retry Payment Now, etc). */
+button.primary {
+    background: var(--primary-teal) !important;
+    border-color: var(--primary-teal) !important;
+}
+button.primary:hover {
+    background: var(--primary-teal-hover) !important;
+    border-color: var(--primary-teal-hover) !important;
 }
 
 /* ---------- Sidebar shell ---------- */
@@ -96,36 +172,72 @@ CUSTOM_CSS = """
     padding: 22px 18px !important;
     max-height: 88vh;
     overflow-y: auto;
+    /* Gradio's own generated class for a flex column defaults to
+       flex-wrap: wrap (confirmed via computed style - not something
+       declared anywhere in this stylesheet). Combined with
+       flex-direction: column and the max-height above, once a child's
+       content pushes the combined height past max-height, the browser
+       doesn't just overflow/scroll - per the CSS flex spec, a wrapping
+       *column* flex container starts a new column to hold the overflow,
+       shifted to the right by roughly the first column's width. .sidebar
+       is a fixed 280px wide box, so that second column renders entirely
+       outside it and gets clipped - invisible on screen despite the DOM/
+       computed styles all reporting completely normal visible/display
+       values. This is what was diagnosed at length as an intermittent
+       Gradio "paint" bug; it's actually a deterministic CSS layout
+       mechanic that only became visible once total sidebar content
+       height reliably exceeded max-height (e.g. once logged in with the
+       profile card + quick actions all showing at once). Forcing
+       nowrap makes a too-tall sidebar behave the way overflow-y: auto
+       above was always meant to - a normal vertical scrollbar - instead
+       of silently wrapping content into an off-screen second column. */
+    flex-wrap: nowrap !important;
+}
+
+/* Every direct child Gradio puts in a flex column gets flex-grow: 1 by
+   default (confirmed via computed style), which left this small logo/text
+   header stretching to fill roughly half of .sidebar's height - mostly
+   empty space, since the header's actual content sits at the top of a
+   box far taller than it needs. That pushed the rest of the sidebar's
+   content below the fold and made .sidebar's own scrollbar (overflow-y:
+   auto above) kick in. Forcing this one block to its natural content
+   height fixes that without touching how anything else in .sidebar
+   sizes itself. */
+.brand-header-block {
+    flex-grow: 0 !important;
+    width: 100% !important;
+}
+/* gr.HTML wraps its actual content in its own inner .html-container div
+   (separate from the "block" div elem_classes lands on) with 10px/12px
+   padding by default - scoped to just this element's own subtree so it
+   doesn't strip padding from every other gr.HTML on the page (profile
+   card, error messages, the seat picker). That padding was quietly
+   eating ~24px of width, which is also why bumping the SVG's own size
+   alone had no visible effect - flex's default shrink-to-fit was
+   compressing it back down to whatever was actually left. */
+.brand-header-block .html-container {
+    padding: 0 !important;
 }
 
 .brand-header {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-bottom: 24px;
-}
-.brand-mark {
-    width: 42px;
-    height: 42px;
-    border-radius: 12px;
-    background: linear-gradient(135deg, var(--color-accent), #a78bfa);
-    color: #fff;
-    display: flex;
-    align-items: center;
     justify-content: center;
-    font-weight: 800;
-    font-size: 20px;
-    flex-shrink: 0;
+    width: 100%;
+    margin-bottom: 8px;
 }
-.brand-text h1 {
-    font-size: 21px;
-    margin: 0;
-    font-weight: 800;
-}
-.brand-text p {
-    margin: 2px 0 0;
-    font-size: 12.5px;
-    color: var(--body-text-color-subdued);
+
+/* guest_panel/profile_panel (both elem_classes=["auth-panel"]): the
+   default Gradio Column gap (16px) between every child - profile card,
+   Log Out, the quick actions label, and all 4 quick-action buttons -
+   added up to nearly 100px on its own, and was the single biggest
+   contributor to the sidebar overflowing a typical ~650-700px browser
+   viewport height (confirmed by measuring scrollHeight vs clientHeight
+   directly - Quick Actions' last button was getting cut off at the
+   bottom). Halving it here is what actually buys back most of that
+   space, more than any individual element's own padding/margin. */
+.auth-panel {
+    gap: 8px !important;
 }
 
 /* ---------- Auth ---------- */
@@ -153,7 +265,7 @@ CUSTOM_CSS = """
     border: 1px solid var(--border-color-primary);
     border-radius: 14px;
     background: var(--background-fill-primary);
-    margin-bottom: 10px;
+    margin-bottom: 4px;
 }
 .avatar {
     width: 40px;
@@ -191,18 +303,25 @@ CUSTOM_CSS = """
     text-transform: uppercase;
     letter-spacing: .05em;
     color: var(--body-text-color-subdued) !important;
-    margin: 20px 0 8px !important;
+    margin: 6px 0 4px !important;
 }
 
-.quick-actions button {
+/* elem_classes goes directly on each quick-action gr.Button (no wrapping
+   Column), so this targets the class directly rather than as a "button
+   inside .quick-actions" descendant selector. */
+.quick-actions {
     justify-content: flex-start !important;
     border-radius: 10px !important;
     font-weight: 500 !important;
-    padding: 11px 14px !important;
-    font-size: 14.5px !important;
-    transition: transform .15s ease, box-shadow .15s ease;
+    padding: 9px 12px !important;
+    font-size: 14px !important;
+    background: var(--quick-action-bg) !important;
+    color: var(--quick-action-text) !important;
+    border: none !important;
+    transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
 }
-.quick-actions button:hover {
+.quick-actions:hover {
+    background: var(--quick-action-hover) !important;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
     transform: translateY(-1px);
 }
@@ -275,6 +394,11 @@ CUSTOM_CSS = """
 }
 .composer textarea {
     border-radius: 999px !important;
+    /* Gradio's own theme renders this textarea with border: 0px none,
+       relying only on a faint box-shadow for definition - barely visible
+       against .chat-panel's white background, so the composer looked
+       like it had no input box at all. */
+    border: 1px solid var(--border-color) !important;
     font-size: 15px !important;
     padding: 12px 18px !important;
     /* Gradio's own autosize JS sets an inline height directly on this
@@ -294,6 +418,19 @@ CUSTOM_CSS = """
     min-width: 90px;
     font-size: 15px !important;
     font-weight: 600 !important;
+}
+
+/* Gradio's own "this output is actively streaming" indicator - a
+   .generating class it adds/removes automatically around the composer's
+   wrapper while a reply is in flight, not something this app's code
+   controls directly. It reads var(--color-accent) for its border color,
+   which the branding remap points at the (bold, dark) primary teal, and
+   defaults to sharp 4px corners - fine against Gradio's own default
+   components, but a jarring, seemingly-unrelated rectangle wrapped
+   around this composer's pill-shaped textbox/button. Rounding it to
+   match their shape reads as an intentional "active" glow instead. */
+.composer .generating {
+    border-radius: 999px !important;
 }
 
 /* ---------- Live seat picker ----------
@@ -547,6 +684,28 @@ function connectSeatPicker(eventId) {{
 """
 
 # ---------- Formatting / HTML-card rendering helpers ----------
+
+def extract_message_text(content):
+    """Chatbot message "content" as a plain string, regardless of shape.
+    Gradio 6's Chatbot normalizes a message's content into a list of
+    content blocks (e.g. [{"type": "text", "text": "..."}]) by the time
+    it round-trips back as a function input, even though this file always
+    writes it as a plain string (see add_user_message/get_ai_response
+    below) - confirmed by a Django 500 (`'list' object has no attribute
+    'strip'`) the first time a message was sent after upgrading from
+    Gradio 5. Only the "user" message's content is ever read back out
+    like this (to build the API payload); every other content assignment
+    in this file is a write, not a read, so isn't affected."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return str(content)
+
 
 def format_event_time(iso_string):
     """ISO datetime string -> human-readable ("18 Jul 2026, 07:30 PM").
@@ -859,7 +1018,8 @@ def stream_chat_with_ai(message, token, conversation_id):
 def login(username, password):
     """Gradio click handler for the Log In button. The long return tuples
     here map positionally onto `auth_outputs` (token, profile card,
-    guest/profile/quick-actions panel visibility) plus the login form's
+    guest/profile panel visibility - quick actions live inside
+    profile_panel now, no separate entry for them) plus the login form's
     own error/password-field outputs — see login_btn.click(...) near the
     bottom of this file for the exact output list they must match."""
     data = request_json(
@@ -874,7 +1034,6 @@ def login(username, password):
             render_profile_card(username),
             gr.update(visible=False),
             gr.update(visible=True),
-            gr.update(visible=True),
             "",
             "",
         )
@@ -883,7 +1042,6 @@ def login(username, password):
         None,
         "",
         gr.update(visible=True),
-        gr.update(visible=False),
         gr.update(visible=False),
         render_error(f"Login failed: {data.get('error', 'Unknown error')}"),
         "",
@@ -900,7 +1058,6 @@ def register(username, email, password):
             "",
             gr.update(visible=True),
             gr.update(visible=False),
-            gr.update(visible=False),
             render_error("Please enter username, email, and password."),
             "",
         )
@@ -914,7 +1071,6 @@ def register(username, email, password):
             None,
             "",
             gr.update(visible=True),
-            gr.update(visible=False),
             gr.update(visible=False),
             render_error(f"Registration failed: {data['error']}"),
             "",
@@ -958,6 +1114,30 @@ def action_updates(actions):
     )
 
 
+def quick_action_updates(quick_actions):
+    """
+    Translate a possibly-None list of new quick-action prompts into
+    gr.update() calls for the four quick-action buttons plus the state
+    backing their click handlers. None - or anything that isn't exactly
+    four items - means "leave them exactly as they are": the backend
+    deliberately omits quick_actions on a "done" event when its
+    generation call hasn't finished by the time the main reply has (see
+    run_turn's non-blocking check before yielding "done"), and this
+    treats a malformed count the same way rather than guessing which
+    button(s) it was meant to replace.
+    """
+    if not quick_actions or len(quick_actions) != len(DEFAULT_QUICK_ACTIONS):
+        return gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+
+    return (
+        gr.update(value=quick_actions[0]),
+        gr.update(value=quick_actions[1]),
+        gr.update(value=quick_actions[2]),
+        gr.update(value=quick_actions[3]),
+        quick_actions,
+    )
+
+
 def logout():
     """Reset auth state, chat history, and every action row back to a
     fresh-visit state."""
@@ -966,10 +1146,10 @@ def logout():
         "",
         gr.update(visible=True),
         gr.update(visible=False),
-        gr.update(visible=False),
         None,
         [WELCOME_MESSAGE],
         *action_updates([]),
+        *quick_action_updates(DEFAULT_QUICK_ACTIONS),
     )
 
 
@@ -993,10 +1173,10 @@ def get_ai_response(history, token, conversation_id, current_actions):
     """
     # Nothing to do if add_user_message skipped an empty message.
     if not history or history[-1]["role"] != "user":
-        yield history, conversation_id, *action_updates(current_actions), gr.update()
+        yield history, conversation_id, *action_updates(current_actions), gr.update(), *quick_action_updates(None)
         return
 
-    message = history[-1]["content"]
+    message = extract_message_text(history[-1]["content"])
 
     # Start the assistant's bubble empty; each streamed chunk grows it in
     # place, so re-yielding the same list (with this last entry mutated) is
@@ -1013,18 +1193,18 @@ def get_ai_response(history, token, conversation_id, current_actions):
             # exactly as it is" — we don't know yet this turn whether it
             # should change, and every yield in this generator must
             # supply a value for every output Gradio is wired to.
-            yield history, conversation_id, *action_updates(current_actions), gr.update()
+            yield history, conversation_id, *action_updates(current_actions), gr.update(), *quick_action_updates(None)
         elif event_type == "done":
             final_event = payload
         elif event_type == "error":
             history[-1]["content"] = payload
-            yield history, conversation_id, *action_updates(current_actions), gr.update()
+            yield history, conversation_id, *action_updates(current_actions), gr.update(), *quick_action_updates(None)
             return
 
     if final_event is None:
         # Connection dropped mid-stream with no "done" event at all — keep
         # whatever text did arrive rather than losing it silently.
-        yield history, conversation_id, *action_updates(current_actions), gr.update()
+        yield history, conversation_id, *action_updates(current_actions), gr.update(), *quick_action_updates(None)
         return
 
     conversation_id = final_event.get("conversation_id", conversation_id)
@@ -1054,7 +1234,10 @@ def get_ai_response(history, token, conversation_id, current_actions):
     seat_picker_event_id = final_event.get("seat_picker_event_id")
     seat_picker_value = str(seat_picker_event_id) if seat_picker_event_id else ""
 
-    yield history, conversation_id, *action_updates(actions), seat_picker_value
+    yield (
+        history, conversation_id, *action_updates(actions), seat_picker_value,
+        *quick_action_updates(final_event.get("quick_actions")),
+    )
 
 
 def run_draft_action(url, token, history, current_actions, conversation_id, action_label):
@@ -1110,21 +1293,36 @@ def run_draft_action(url, token, history, current_actions, conversation_id, acti
 # database, since this frontend is intentionally stateless server-side —
 # all real state lives in Django/Redis, this just carries the handles to
 # it (token, conversation_id) between one browser interaction and the next.
-with gr.Blocks(
-    title="EventOps AI Assistant",
-    theme=gr.themes.Soft(),
-    css=CUSTOM_CSS,
-    head=SEAT_PICKER_HEAD,
-) as demo:
+with gr.Blocks(title="EventOps AI Assistant") as demo:
     token_state = gr.State(None)
     conversation_id_state = gr.State(None)
     action_state = gr.State([])
+    quick_actions_state = gr.State(list(DEFAULT_QUICK_ACTIONS))
 
     with gr.Row(equal_height=True):
         with gr.Column(scale=1, min_width=280, elem_classes=["sidebar"]):
-            gr.HTML(BRAND_HEADER_HTML)
+            gr.HTML(BRAND_HEADER_HTML, elem_classes=["brand-header-block"])
 
-            with gr.Column(visible=True) as guest_panel:
+            # min_width=0 on both: Gradio's Column defaults its own
+            # min-width to 320px when not given explicitly, but .sidebar
+            # itself is pinned to min_width=280 above - a 320px-min child
+            # inside a 280px-wide parent has nowhere to shrink to and
+            # overflows, and depending on the rest of the flex layout that
+            # overflow can spill the whole column outside .sidebar's
+            # bounds (confirmed via direct DOM inspection: the visible
+            # panel's computed rect landed ~60px to the right of
+            # .sidebar's own edge, painted underneath the chat panel,
+            # despite display/visibility both reporting normal). Explicit
+            # 0 here removes the conflicting constraint instead of fighting
+            # it with more layout rules on top. Note: this mitigates the
+            # issue but doesn't eliminate it outright - it's a genuine,
+            # intermittent Gradio/browser rendering race with toggling
+            # sibling Columns' visibility, confirmed present even in the
+            # original pre-quick-actions code and not fully solved by any
+            # approach tried so far (CSS, forced-reflow JS, or rebuilding
+            # this panel via @gr.render(...) instead of visible= toggling
+            # - all were tried and none were fully reliable).
+            with gr.Column(visible=True, min_width=0, elem_classes=["auth-panel"]) as guest_panel:
                 gr.Markdown("Sign in to manage your bookings.", elem_classes=["auth-hint"])
                 with gr.Tabs():
                     with gr.Tab("Log In"):
@@ -1143,21 +1341,27 @@ with gr.Blocks(
                         )
                         register_error = gr.HTML("")
 
-            with gr.Column(visible=False) as profile_panel:
+            with gr.Column(visible=False, min_width=0, elem_classes=["auth-panel"]) as profile_panel:
                 profile_card = gr.HTML("")
                 logout_btn = gr.Button("Log Out", variant="secondary")
-
-            with gr.Column(visible=False) as quick_actions_panel:
+                # Quick actions live INSIDE profile_panel rather than as
+                # their own sibling column with an independent visible=
+                # toggle, so they show/hide as a side effect of
+                # profile_panel's own toggle instead of needing to stay
+                # in sync with it via a second toggle of their own.
                 gr.Markdown("Quick Actions", elem_classes=["section-label"])
-                with gr.Column(elem_classes=["quick-actions"]):
-                    weekend_btn = gr.Button("Events This Weekend")
-                    cheap_btn = gr.Button("Cheapest Events")
-                    expensive_btn = gr.Button("Most Expensive Events")
-                    next_month_btn = gr.Button("Events Next Month")
+                # Generic, index-based slots now, not fixed-meaning
+                # buttons - their label/prompt is whatever
+                # quick_actions_state currently holds (starts at
+                # DEFAULT_QUICK_ACTIONS, updated after each reply; see
+                # quick_action_updates and run_turn's backend side).
+                quick_action_btn_1 = gr.Button(DEFAULT_QUICK_ACTIONS[0], elem_classes=["quick-actions"])
+                quick_action_btn_2 = gr.Button(DEFAULT_QUICK_ACTIONS[1], elem_classes=["quick-actions"])
+                quick_action_btn_3 = gr.Button(DEFAULT_QUICK_ACTIONS[2], elem_classes=["quick-actions"])
+                quick_action_btn_4 = gr.Button(DEFAULT_QUICK_ACTIONS[3], elem_classes=["quick-actions"])
 
         with gr.Column(scale=4, elem_classes=["chat-panel"]):
             chatbot = gr.Chatbot(
-                type="messages",
                 height="72vh",
                 value=[WELCOME_MESSAGE],
                 show_label=False,
@@ -1204,7 +1408,11 @@ with gr.Blocks(
                 )
                 send_btn = gr.Button("Send", variant="primary", scale=1)
 
-    auth_outputs = [token_state, profile_card, guest_panel, profile_panel, quick_actions_panel]
+    # quick_actions_panel no longer exists as its own component - the
+    # quick-action buttons live inside profile_panel now (see its own
+    # comment), so there's nothing extra to list here for them; toggling
+    # profile_panel already shows/hides them as a side effect.
+    auth_outputs = [token_state, profile_card, guest_panel, profile_panel]
 
     login_btn.click(
         fn=login,
@@ -1233,6 +1441,11 @@ with gr.Blocks(
             confirm_retry_btn,
             dismiss_retry_btn,
             composer_row,
+            quick_action_btn_1,
+            quick_action_btn_2,
+            quick_action_btn_3,
+            quick_action_btn_4,
+            quick_actions_state,
         ],
     )
 
@@ -1252,6 +1465,11 @@ with gr.Blocks(
         dismiss_retry_btn,
         composer_row,
         active_seat_event_id,
+        quick_action_btn_1,
+        quick_action_btn_2,
+        quick_action_btn_3,
+        quick_action_btn_4,
+        quick_actions_state,
     ]
 
     # Fires whenever get_ai_response changes active_seat_event_id's value
@@ -1359,10 +1577,19 @@ with gr.Blocks(
         outputs=action_outputs,
     )
 
-    weekend_btn.click(fn=lambda: "What events are available this weekend?", outputs=msg)
-    cheap_btn.click(fn=lambda: "Show me the cheapest events", outputs=msg)
-    expensive_btn.click(fn=lambda: "Show me the most expensive events", outputs=msg)
-    next_month_btn.click(fn=lambda: "What events are available next month?", outputs=msg)
+    # Each button sends whatever quick_actions_state currently holds at
+    # its own index - not a fixed string - since these get relabeled
+    # after every reply (see quick_action_updates/get_ai_response above).
+    quick_action_btn_1.click(fn=lambda actions: actions[0], inputs=[quick_actions_state], outputs=msg)
+    quick_action_btn_2.click(fn=lambda actions: actions[1], inputs=[quick_actions_state], outputs=msg)
+    quick_action_btn_3.click(fn=lambda actions: actions[2], inputs=[quick_actions_state], outputs=msg)
+    quick_action_btn_4.click(fn=lambda actions: actions[3], inputs=[quick_actions_state], outputs=msg)
 
 
-demo.launch(server_name="0.0.0.0", server_port=7860)
+demo.launch(
+    server_name="0.0.0.0",
+    server_port=7860,
+    theme=gr.themes.Soft(),
+    css=CUSTOM_CSS,
+    head=SEAT_PICKER_HEAD,
+)
