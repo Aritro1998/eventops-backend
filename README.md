@@ -1,19 +1,49 @@
 # 🚀 EventOps Backend
 
-A **production-style backend system** for event management and seat booking, combining **concurrency-safe transactional workflows** with an **LLM-powered AI assistant**, **real-time seat availability**, and a **RAG-based knowledge layer** — designed to demonstrate backend engineering beyond basic CRUD.
+A backend system for event management and seat booking — built to demonstrate Django/Python backend engineering beyond CRUD: concurrency control, transactional correctness, distributed background processing, real-time updates, and caching consistency, with an AI assistant integrated on top of the same service layer the REST API uses.
 
-Built to showcase backend engineering beyond basic CRUD — **concurrency control**, **service-layer design**, **async workflow reliability**, and **production-style operational thinking**, applied to real-world challenges like:
-
-* preventing **double booking under high concurrency**
-* handling **distributed service dependencies** (Celery, Redis, WebSockets)
-* designing **extensible systems for async processing**
-* building a **tool-calling AI agent** on top of real transactional business logic, not a toy wrapper around an LLM, reading/writing through the same service layer as the REST API
-* answering natural-language questions grounded in real data via **retrieval-augmented generation**
-* per-call **cost/usage observability** for the LLM integration itself, not just the transactional core
+The AI assistant is a real capability, not a demo bolted onto the side of the app — it reads and writes through the exact same transactional service layer, tools, and cache as the REST API, with destructive actions always gated behind explicit human confirmation.
 
 ---
 
-## 🧠 System Architecture Overview
+## What This Project Demonstrates
+
+**Backend engineering**
+* Django / DRF: layered API design, JWT auth, role-based permissions, throttling, pagination
+* Concurrency & data integrity: `select_for_update()` row locking, idempotency keys, database constraints
+* Distributed systems: Celery + Redis-backed task queue, a persistent `WorkflowJob` model for durable async state
+* Real-time systems: Django Channels + a Redis-backed channel layer for cross-process WebSocket coordination
+* Caching: a single cached service layer shared by the REST API and the AI assistant, with consistent invalidation on every write
+* Search: PostgreSQL trigram indexing (`pg_trgm`) for fuzzy text search, no in-Python scanning
+
+**AI integration**
+* LangChain tool-calling agent, LangGraph for stateful, human-in-the-loop workflows (booking, cancellation, payment retry)
+* Retrieval-augmented generation: `pgvector` similarity search over embedded knowledge documents
+* Per-call token/cost observability for every LLM and embedding call
+
+**Operational maturity**
+* Structured JSON logging, an admin-facing usage/cost dashboard, and workflow retry tooling
+* Deterministic test suite plus a separate behavioral eval harness for the LLM-driven paths
+* Containerized deployment with a real dev/production split — Nginx reverse proxy, multi-worker ASGI server, environment-driven configuration
+
+---
+
+## Quick Start
+
+```bash
+git clone https://github.com/Aritro1998/eventops-backend.git
+cd eventops-backend
+cp .env.example .env   # add your OPENAI_API_KEY
+docker compose up -d --build
+```
+
+Then open `http://localhost:8000` (API/admin) and `http://localhost:7860` (AI assistant demo chat). See [Setup & Running Locally](#️-setup--running-locally) for the full walkthrough, including the production configuration.
+
+---
+
+## 🧠 Architecture Overview
+
+The system is organized around a few concrete backend problems: preventing double booking under concurrent requests, keeping a cache consistent with the database on every write, coordinating background work durably (not just fire-and-forget), pushing real-time updates to connected clients, and letting an AI agent act on real data without being able to make an unreviewed mutation.
 
 ```text
 Client (REST) ---------- Client (WebSocket) ---------- Client (AI Chat)
@@ -22,17 +52,17 @@ Client (REST) ---------- Client (WebSocket) ---------- Client (AI Chat)
 DRF API Layer          Channels Consumer            Async Chat View (SSE)
      |                          |                            |
      v                          |                            v
-Service Layer <------------------------------------  AI Tool-Calling Loop
-     |                                                        |
-     +--> PostgreSQL (events, seats, bookings,        (search events, check
-     |     workflow jobs, knowledge chunks +           seats, draft booking/
-     |     pgvector embeddings)                        cancel/payment-retry)
-     |                                                        |
-     +--> Redis (cache + Celery broker/result          shares the SAME
-     |     backend + Channels layer)                    cached read paths
-     |                                                   and service layer
-     v                                                   as the REST API
-WorkflowJob persistence
+Service Layer <------------------------------------  LangChain/LangGraph
+     |                                                 Agent Loop
+     +--> PostgreSQL (events, seats, bookings,                |
+     |     workflow jobs, knowledge chunks +          (search events, check
+     |     pgvector embeddings)                        seats, draft booking/
+     |                                                  cancel/payment-retry)
+     +--> Redis (cache + Celery broker/result                 |
+     |     backend + Channels layer)                   shares the SAME
+     |                                                   cached read paths
+     v                                                   and service layer
+WorkflowJob persistence                                  as the REST API
      |
      v
 Celery Workers
@@ -40,162 +70,198 @@ Celery Workers
      +--> booking expiry handling
      +--> confirmation email delivery
      +--> knowledge document chunking + embedding generation
+     +--> stale LangGraph checkpoint cleanup
 ```
 
-Background workflows are coordinated through a persistent `WorkflowJob` model and executed by `Celery` workers for async follow-up tasks such as booking expiry handling, confirmation delivery, and knowledge-base embedding generation. Live seat state is pushed to connected clients over WebSockets (Django Channels), and the AI assistant reads through the exact same cached service layer the REST API uses — there's one source of truth for event/seat data, not two implementations that can drift apart.
-
-### Booking Flow
-
-1. The client sends a booking request to `POST /api/bookings/`.
-2. The API layer authenticates the user, validates input, and applies throttling.
-3. `BookingService` performs an idempotency check and re-checks it again inside `transaction.atomic()`.
-4. The seat row is locked with `select_for_update()` to prevent concurrent seat claims.
-5. A `PENDING` booking is created in PostgreSQL with an expiry timestamp.
-6. A `WorkflowJob` is created to expire the booking later if it is not confirmed in time.
-7. Payment is processed in the request flow; on success the booking becomes `CONFIRMED`.
-8. A confirmation workflow job is queued on state transition, and Celery workers handle email delivery and expiry processing in the background.
-9. Every state change that affects seat availability — new hold, confirmation, cancellation, expiry — invalidates the shared event cache **and** broadcasts a live seat update over WebSockets in one place (`Booking.release_seats()` / the payment-success path), so no call site can forget one half of the pair.
-
-This architecture is designed to provide:
-
-* concurrency safety for seat allocation
-* retry-safe booking requests via idempotency
-* durable async workflow tracking beyond the task queue alone
-* cache consistency and real-time UI consistency after every state change
-
-### AI Assistant Flow
-
-1. The client opens a streaming chat session at `POST /api/ai-assistant/chat/stream/` (Server-Sent Events over an async Django view, using the async ORM directly — no `sync_to_async` wrapping the whole request).
-2. The assistant runs a LangChain tool-calling loop (`gpt-4o-mini` via `ChatOpenAI`, `parallel_tool_calls=False`, up to 5 tool calls per turn) with tools for searching events, checking seat availability, querying the RAG knowledge base, and reading a user's bookings.
-3. Anything destructive — creating a booking, cancelling one, retrying a payment — never executes directly from a tool call. Each one pauses its own dedicated LangGraph graph (`ai_assistant/langgraph_flows/`) via `interrupt()`, with a lightweight marker row (`PendingBookingThread` / `PendingBookingCancellation` / `PendingPaymentRetry`) pointing at whichever paused thread is currently relevant — the actual draft state lives in the graph's own checkpoint, not the row. Cancellation runs an additional two-step "are you sure" confirmation inside its graph before anything is touched. Only a separate, explicit confirm endpoint ever resumes a graph or calls into `BookingService`/`PaymentService`. Unconfirmed drafts expire automatically via the same Celery/`WorkflowJob` cleanup pattern used for booking holds — a separate scheduled task also garbage-collects the underlying LangGraph checkpoint data itself once it's old enough to be safely orphaned, independent of whether its marker row was ever cleaned up.
-4. Every read tool (event search, seat availability) goes through the **same cached service functions** the REST API uses (`events/caching.py`), so the AI and the API can never show inconsistent data or double the cache-warming cost.
-5. Every OpenAI call is logged to `UsageLog` — prompt/completion/system-prompt token counts (via `tiktoken`) and which tool (if any) was invoked — surfaced in a custom Django admin analytics view.
+Background workflows are coordinated through a persistent `WorkflowJob` model and executed by Celery workers. Live seat state is pushed to connected clients over WebSockets (Django Channels). The AI assistant reads through the exact same cached service layer the REST API uses — there's one source of truth for event/seat data, not two implementations that can drift apart.
 
 ---
 
 ## 🧱 Tech Stack
 
-* **Backend:** Django 5.x, Django REST Framework
-* **Auth:** JWT (djangorestframework-simplejwt)
-* **Database:** PostgreSQL + `pgvector` (embedding storage/similarity search)
-* **Cache / Queue:** Redis
-* **Async tasks:** Celery (worker + beat)
-* **Real-time:** Django Channels + Daphne (ASGI, WebSockets)
-* **AI:** OpenAI API (chat completions + embeddings), streamed via native async Django views and the async ORM, `tiktoken` for local token counting
-* **Frontend (demo client):** Gradio chat UI
-* **Containerization:** Docker & Docker Compose
+**Backend**
+* Django 5.x, Django REST Framework
+* JWT auth (djangorestframework-simplejwt)
+* PostgreSQL, with `pgvector` and `pg_trgm` extensions
+* Redis (cache, Celery broker/result backend, Channels layer)
+* Celery (worker + beat)
+* Django Channels (ASGI, WebSockets)
+
+**AI integration**
+* LangChain (tool-calling agent loop)
+* LangGraph (stateful, human-in-the-loop workflows with a persistent Postgres checkpointer)
+* OpenAI API (chat completions + embeddings), `tiktoken` for local token counting
+
+**Deployment**
+* Daphne (development), uvicorn with multiple worker processes (production)
+* Nginx reverse proxy (production) — static files and WebSocket/HTTP proxying
+* Docker & Docker Compose, with a profile-based dev/production split
+* Gradio (demo chat frontend)
 
 ---
 
-## ⚙️ Key Engineering Decisions
+## Backend Design Highlights
 
-* Used `select_for_update()` for row-level locking to prevent double booking under concurrency
-* Implemented per-user idempotency keys so booking creation is safe to retry
-* Added a `WorkflowJob` model for persistent async job tracking instead of relying on Celery state alone
-* Used Redis for caching, the Celery broker/result backend, **and** the Channels layer for WebSockets
-* Combined database constraints, targeted indexes, and a composite workflow index for data integrity and query efficiency
-* Consolidated cache invalidation and WebSocket broadcasting into `Booking.release_seats()` itself, instead of repeating both calls at every call site that can release a seat (cancellation, expiry, payment failure) — a real bug (two call sites silently missing invalidation) surfaced and was fixed by making this the single owner of that side effect
-* Added `PendingPaymentRetry` as a marker row (mirroring `PendingBookingThread`), after testing surfaced a real bug: guessing "the most recent FAILED booking" for a payment retry silently resolved to the wrong one once a user had more than one failed booking at once
-* A dedicated Celery task deletes orphaned LangGraph checkpoint data (the three `Pending*` cleanup tasks only ever delete the marker row, never the checkpoint it points at) — it goes by checkpoint age rather than cross-referencing live markers, trading cleanup precision for staying fully independent of each marker type's own thread-id convention
-* Unified the REST API and the AI assistant's event/seat reads onto one cached service layer (`events/caching.py`) rather than the AI hitting the database uncached on every tool call
-* Kept destructive AI actions behind an explicit human-confirmed draft (`Pending*` models) instead of letting the model call booking/cancellation/payment mutations directly
-* Layered Django admin's own permission system with the app's business `role` field: a `post_save` signal keeps every `ORGANIZER` user's Group membership in sync automatically, and `EventAdmin`/`SeatAdmin` add object-level ownership checks on top — so an organizer with admin access can only ever touch events they created, matching the same rule already enforced on the API (`IsAdminOrOrganizer`)
-* Per-call OpenAI token/cost visibility via a dedicated `UsageLog` model instead of trusting provider dashboards alone
+| Problem | Approach |
+|---|---|
+| Concurrent seat booking | PostgreSQL `select_for_update()` + `transaction.atomic()` |
+| Duplicate/retried requests | Per-user idempotency keys |
+| Data integrity | Database constraints as a final safety net, not just app-level checks |
+| Durable async processing | Celery + a persistent `WorkflowJob` model, not just in-memory task state |
+| Real-time updates | Django Channels + a Redis-backed channel layer, safe across multiple server processes |
+| Cache consistency | One consolidated invalidation + broadcast point per state change, not repeated per call site |
+| Expiring bookings | Celery Beat + scheduled workflow cleanup |
+| Fuzzy event search | PostgreSQL `pg_trgm` + a GIN index — one indexed query, no Python-side scan |
+| AI-driven mutations | LangGraph pauses the graph; nothing writes until a human explicitly confirms |
+| Knowledge retrieval | `pgvector` similarity search over chunked, embedded documents |
+| Observability | Structured logs, per-call token/cost tracking, admin analytics |
 
-## 🚀 Performance & Scaling Highlights
+---
 
-* Optimized hot paths with `select_related`, Redis caching, and targeted database indexes
-* Cached event list and detail responses to reduce repeated read load on PostgreSQL — shared between the REST API and the AI assistant's tools
-* Added a concurrency test with parallel booking attempts to verify that at most one booking reaches `CONFIRMED` for the same seat
-* Enforced uniqueness for confirmed seat bookings at the database level as a final safety net
-* Applied DRF throttling on auth and booking endpoints to reduce abuse risk
-* Fuzzy event-name search runs as a single indexed Postgres query (`pg_trgm` + a GIN trigram index + `TrigramWordSimilarity`) so the AI assistant can resolve a misspelled or partial event name to the right event without scanning every row in Python
-* Capped Celery worker concurrency explicitly (`--concurrency=2`) after profiling showed the CPU-count default (10 workers) spawning far more full Django-loaded processes than local task volume ever needed
+## Key Workflows
+
+### Concurrent Booking
+
+```text
+Request → Idempotency check → transaction.atomic() → select_for_update()
+   → Create PENDING booking → Payment → CONFIRMED
+   → Invalidate cache + broadcast WebSocket update → WorkflowJob (Celery)
+```
+
+1. `POST /api/bookings/` — authenticated, validated, throttled.
+2. `BookingService` checks idempotency, then re-checks it again inside `transaction.atomic()`.
+3. The seat row is locked with `select_for_update()` so no two concurrent requests can claim it.
+4. A `PENDING` booking is created with an expiry timestamp, and a `WorkflowJob` is scheduled to expire it if unconfirmed.
+5. On successful payment the booking becomes `CONFIRMED`; on any seat-affecting change, the cache is invalidated and a WebSocket update is broadcast from one consolidated place, so neither can be forgotten independently.
+
+### AI Assistant
+
+```text
+User message → LangChain tool-calling loop → (read tools: cached service layer)
+   → (write intent: booking / cancel / payment retry)
+      → LangGraph pauses the graph, awaiting confirmation
+         → Human clicks confirm → BookingService / PaymentService → Database
+```
+
+1. The client opens a streaming chat session (`POST /api/ai-assistant/chat/stream/`, Server-Sent Events).
+2. The assistant runs a LangChain tool-calling loop against `gpt-4o-mini`, with tools for searching events, checking seats, querying the knowledge base, and reading bookings — all through the same cached service layer the REST API uses.
+3. Anything destructive never executes directly from a tool call. It pauses a dedicated LangGraph graph, and only a separate, explicit confirm action ever resumes it and calls into `BookingService`/`PaymentService`. Unconfirmed drafts and their underlying LangGraph checkpoints both expire automatically via scheduled Celery cleanup.
+4. Every OpenAI call — chat and embeddings alike — is logged with token counts and cost-relevant metadata to `UsageLog`, visible in a custom admin dashboard.
+
+---
+
+## ⚙️ Engineering Decisions & Trade-offs
+
+Real problems found during development, and the design change that fixed them — not just a list of technologies used.
+
+* **Cache/WebSocket consistency** — centralized seat-release side effects into one place (`Booking.release_seats()`) instead of repeating both calls at every call site that can release a seat. A real bug (two call sites silently missing the cache invalidation) surfaced and was fixed by making this the single owner of that side effect.
+* **Payment retry targeting** — added `PendingPaymentRetry` as a marker row after testing surfaced a real bug: guessing "the most recent FAILED booking" silently resolved to the wrong one once a user had more than one failed booking at once.
+* **Fuzzy search performance** — replaced an in-Python `rapidfuzz` scan with a single indexed Postgres query (`pg_trgm` + GIN + `TrigramWordSimilarity`). Removes a full-table scan on every AI tool call and drops an external dependency.
+* **AI mutation safety** — destructive AI actions stay behind an explicit human-confirmed draft (`Pending*` models + LangGraph's `interrupt()`) rather than letting the model call booking/cancellation/payment mutations directly.
+* **Settings isolation bug** — `core/settings/__init__.py` used to re-export dev settings (`from .dev import *`), which meant simply importing `core.settings.prod` silently imported dev settings too, in-place-mutating a list shared with `base.py` and leaking dev-only apps into production. Fixed by removing the re-export and switching the mutation to a non-in-place list operation.
+* **Fail-fast production config** — `core.settings.prod` raises `ImproperlyConfigured` if `SECRET_KEY` isn't explicitly set, instead of silently inheriting `base.py`'s dev-only fallback key.
+* **Static files stay in Docker** — `collectstatic` output is written to a Docker-managed named volume rather than the bind-mounted project directory, so generated build artifacts never land on the host filesystem, while still being shared between the app and Nginx containers.
+* **Admin permissions mirror the API** — a `post_save` signal keeps every `ORGANIZER` user's Django Group membership in sync automatically, and `EventAdmin`/`SeatAdmin` add object-level ownership checks on top, so admin access enforces the same rule as the API (`IsAdminOrOrganizer`) instead of a separate, looser one.
+
+---
+
+## 🚀 Performance & Scaling
+
+* `select_related`, Redis caching, and targeted database indexes on hot read paths
+* Event list/detail responses cached in Redis, shared between the REST API and the AI assistant
+* Confirmed seat uniqueness enforced at the database level as a final safety net, on top of application-level locking
+* DRF throttling on auth and booking endpoints
+* Celery worker concurrency capped explicitly (`--concurrency=2`) after profiling showed the CPU-count default spawning far more full Django processes than local task volume needed
+* Production uvicorn runs multiple worker processes safely because no application state (auth, chat history, checkpoint data) lives in a single worker's memory — everything is already externalized to Redis or Postgres
 
 ## 📊 Observability
 
-* Structured JSON logging is configured through `python-json-logger`
-* Key workflows emit logs for booking creation, payment outcomes, cache invalidation, workflow execution, retries, and failures
-* `WorkflowJob` tracks async lifecycle state including `status`, `retry_count`, `last_error`, `started_at`, `completed_at`, and `result`
-* Admin APIs expose failed jobs, stuck jobs, and retry actions for operational recovery
-* `UsageLog` records prompt/completion/system-prompt tokens and the tool invoked for every OpenAI API call — chat completions and the knowledge base's embedding calls alike; a custom Django admin changelist view aggregates this into per-model and per-day token totals plus system-prompt-overhead percentage, scoped to whatever filter is active, and labels each row "Chat" or "Embedding" so spend on the two is easy to tell apart
+* Structured JSON logging (`python-json-logger`) across booking, payment, cache, and workflow events
+* `WorkflowJob` tracks async lifecycle state — `status`, `retry_count`, `last_error`, timestamps, `result`
+* Admin APIs expose failed/stuck jobs and manual retry actions
+* `UsageLog` records token counts and cost-relevant metadata for every OpenAI call (chat and embeddings), aggregated in a custom admin dashboard by model, day, and call type
 
 ---
 
 ## ✨ Core Capabilities
 
-### ✅ Authentication & Users
+Reference detail for each area — see [Backend Design Highlights](#backend-design-highlights) for the scannable version.
 
-* JWT-based auth with registration, login, and token refresh endpoints
-* `users.User` supports `ADMIN`, `ORGANIZER`, and `USER` roles
-* Registration normalizes email and enforces Django password validation
-* A signal keeps every `ORGANIZER` user in sync with an "Organizers" Django Group (base admin permissions), layered under object-level ownership checks in `EventAdmin`/`SeatAdmin` — organizers get admin access to only the events they created, mirroring the API's own permission rule
+<details>
+<summary><strong>Authentication & Users</strong></summary>
 
-### ✅ Event Management
+* JWT-based auth: registration, login, token refresh
+* `ADMIN`, `ORGANIZER`, and `USER` roles
+* A signal keeps `ORGANIZER` users in sync with an admin Group; object-level ownership checks layered on top, mirroring the API's own permission rule
+</details>
 
-* Event CRUD with role-aware write permissions (admins: any event; organizers: only their own, enforced identically in the API and the Django admin)
-* `available_seats` is exposed in read responses, annotated live from booking state — never a stored/stale count
-* Event list and detail responses are cached in Redis for 5 minutes, shared between the REST API and the AI assistant
-* Event writes invalidate cache entries automatically
-* Seat generation and seat-count updates are handled safely inside transactional logic, driven by either a manually-typed seat count or an auto-generated layout from a Venue's Space
-* Database constraints enforce event and seat integrity
+<details>
+<summary><strong>Event Management</strong></summary>
 
-### ✅ Booking System
+* Role-aware CRUD (admins: any event; organizers: only their own), enforced identically in the API and Django admin
+* `available_seats` annotated live from booking state, never a stored/stale count
+* Seat generation from either a manually-typed count or an auto-generated layout from a Venue's Space
+</details>
 
-* Booking creation uses idempotency keys, transactional re-checks, and row-level seat locking
-* Confirmed seat uniqueness is enforced at the database level
-* Payment flow supports retries and expiration handling (simulated gateway — see `payments/services.py`)
-* Booking expiry and confirmation follow-up actions are managed through Celery-backed workflow jobs
-* Booking endpoints support filtering, pagination, cancellation, and abuse protection via throttling
-* Every seat-affecting state change invalidates the cache and broadcasts a live WebSocket update from one consolidated place (`Booking.release_seats()`)
+<details>
+<summary><strong>Booking System</strong></summary>
 
-### ✅ Real-Time Seat Availability (WebSockets)
+* Idempotency keys, transactional re-checks, row-level seat locking
+* Simulated payment gateway with retry and expiration handling
+* Filtering, pagination, cancellation, throttling on all booking endpoints
+</details>
 
-* `ws/events/<event_id>/seats/` pushes live "available" / "locked" / "booked" status to every connected client watching an event's seat map
-* A newly-connecting client gets an immediate snapshot of current seat state, then live diffs as other users lock/book/release seats
-* Backed by Django Channels + a Redis-backed channel layer, so it works across multiple server processes, not just one
+<details>
+<summary><strong>Real-Time Seat Availability</strong></summary>
 
-### ✅ AI Assistant
+* `ws/events/<event_id>/seats/` — snapshot on connect, live diffs as seats lock/book/release
+* Redis-backed Channels layer, verified working across separate worker processes
+</details>
 
-* Streaming chat (Server-Sent Events) over an async Django view using OpenAI's chat completions API with tool calling
-* Tools for searching events (fuzzy name matching), checking seat availability, reading a user's bookings, and answering knowledge-base questions
-* Destructive actions (booking, cancellation, payment retry) always go through a human-confirmed draft before anything is written — the model can propose, never directly execute
-* Reads share the same Redis-cached service layer as the REST API — no separate, uncached data path for the AI
-* Per-call OpenAI usage (tokens, system-prompt overhead, tool invoked) logged to `UsageLog` with an admin analytics dashboard
-* A minimal LLM eval harness (`ai_assistant/evals/`) runs real prompts through the actual `chat_stream` code path and asserts on tool calls and response content — not mocks, the same reliability-testing approach used to catch two real intermittent tool-selection bugs during development
-* The demo chat's quick-action suggestions blend a small, state-driven deterministic slot (e.g. "Book seats for X" once an event is selected) with AI-generated suggestions for the rest — the model is told which slots are already decided so it doesn't duplicate them, and is instructed to name real events from the conversation instead of generic placeholders
+<details>
+<summary><strong>AI Assistant</strong></summary>
 
-### ✅ Knowledge Base (RAG)
+* Streaming SSE chat, LangChain tool-calling loop, LangGraph-gated destructive actions
+* A minimal LLM eval harness (`ai_assistant/evals/`) runs real prompts through the actual `chat_stream` code path — not mocks, caught two real intermittent tool-selection bugs during development
+* Sidebar quick-action suggestions blend a small deterministic slot (state-driven, always reliable) with AI-generated ones for the rest
+</details>
 
-* `KnowledgeDocument`/`KnowledgeChunk` models hold venue- and/or event-scoped reference content (policies, FAQs, venue info), optionally global
-* Documents are chunked and embedded (OpenAI embeddings, `pgvector` for storage and similarity search) automatically via a Celery workflow job whenever a document is created or edited
-* The AI assistant's knowledge tool retrieves the most relevant chunks for a user's question, scoped to the venue/event in context when one is selected
+<details>
+<summary><strong>Knowledge Base (RAG)</strong></summary>
 
-### ✅ Venues & Spaces
+* Venue/event-scoped or global reference documents, auto-chunked and embedded via a Celery job on save
+* `pgvector` similarity search, scoped to the venue/event in context when one is selected
+</details>
 
-* `Venue`/`Space` models describe a physical location and its seat layout (rows/columns or general admission, with a configurable label style)
-* An Event can attach to a Space to auto-generate its seats from that layout, or stay fully custom with a manually-typed seat count
-* Chained venue → space dropdowns in the Django admin (client-side filtering, no third-party dependency)
+<details>
+<summary><strong>Venues & Spaces</strong></summary>
 
-### ✅ Workflow Monitoring & Recovery
+* Physical location + seat layout modeling (rows/columns or general admission)
+* Chained venue → space dropdowns in Django admin, client-side, no third-party dependency
+</details>
 
-* Admin endpoints support workflow listing, failed-job inspection, stuck-job detection, and manual retries
-* Workflow jobs can be filtered by type, status, and creation date
-* Retry operations reset workflow state before requeueing
+<details>
+<summary><strong>Workflow Monitoring & Recovery</strong></summary>
 
-### ✅ Infrastructure & Tooling
+* Admin endpoints for workflow listing, failed/stuck job inspection, manual retries
+* Scheduled cleanup for both expired action drafts and their underlying LangGraph checkpoint data
+</details>
 
-* Docker Compose includes `db` (Postgres + pgvector), `redis`, `web`, `gradio` (demo chat frontend), `celery`, and `celery-beat`
-* Redis powers caching, Celery infrastructure, and the Channels layer
-* Structured JSON logs are emitted for key operational paths
-* Test suites cover bookings, payments, events, and workflows in depth; venues/knowledge/ai_assistant currently have thinner coverage (see Testing & Evals below) — the AI assistant instead relies on its eval harness for behavioral coverage
-* Postman collection and environment files are included for quick API exploration
+<details>
+<summary><strong>Deployment Configuration</strong></summary>
+
+* A single `DJANGO_SETTINGS_MODULE` variable controls both which Django settings load and which server `entrypoint.sh` starts
+* Nginx reverse-proxies HTTP/WebSocket traffic and serves static files directly in production; not started at all in development (Docker Compose profile-gated)
+* Static files live in a Docker-managed volume, isolated from the host filesystem
+</details>
 
 ---
 
 ## 🧪 Testing & Evals
 
 Two separate things, run separately — deterministic unit/integration tests for the transactional backend, and behavioral evals for the LLM-driven assistant (an LLM's correctness can't be asserted the same way a plain function's can — the same prompt at `temperature=0` can still occasionally take a different tool-calling path).
+
+A concurrency test fires 10 simultaneous booking requests for the same seat via real threads and verifies exactly one reaches `CONFIRMED` — checked against the database state directly, not just response codes.
 
 ```bash
 # Run the full Django test suite
@@ -221,117 +287,111 @@ docker compose exec web python manage.py generate_knowledge_embeddings
 docker compose exec web python manage.py generate_knowledge_embeddings --document-id <id>
 ```
 
+Test suites cover bookings, payments, events, and workflows in depth, with growing coverage for the AI assistant; venues and knowledge currently have thinner automated coverage — the AI assistant relies on its eval harness for behavioral coverage instead.
+
 ---
 
-## ⚙️ Local Setup (Docker)
+## 📁 Project Structure
 
-1. Clone:
+```text
+eventops-backend/
+├── ai_assistant/         # LangChain/LangGraph agent, tools, evals
+│   ├── langchain_tools/
+│   ├── langgraph_flows/
+│   ├── actions/          # confirm/dismiss handlers for staged AI drafts
+│   └── evals/
+├── bookings/              # Booking creation, cancellation, payment retry
+├── events/                 # Events, seats, caching, WebSocket consumer
+├── payments/               # Simulated payment gateway
+├── workflows/               # WorkflowJob model + Celery tasks
+├── knowledge/                # RAG documents, chunking, embeddings
+├── venues/                    # Venue/Space seat-layout modeling
+├── users/                      # Auth, roles
+└── core/
+    └── settings/                # base / dev / prod split
+```
+
+Each domain app follows the same internal shape: `models.py` for schema, `services.py` for business logic, `views.py`/`serializers.py` for the API surface — business logic lives in the service layer, not in views, so the REST API and the AI assistant's tools can call the exact same functions.
+
+---
+
+## ⚙️ Setup & Running Locally
+
+### 1. Clone
 
 ```bash
 git clone https://github.com/Aritro1998/eventops-backend.git
 cd eventops-backend
 ```
 
-2. Create `.env`:
-
-```env
-DEBUG=True
-SECRET_KEY=dev-secret-key
-DJANGO_SETTINGS_MODULE=core.settings.dev
-DB_NAME=eventops
-DB_USER=postgres
-DB_PASSWORD=postgres
-DB_HOST=db
-DB_PORT=5432
-
-# Required for the AI assistant and knowledge-base embeddings
-OPENAI_API_KEY=sk-...
-
-# Optional — defaults shown
-OPENAI_CHAT_MODEL=gpt-4o-mini
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-EMBEDDING_DIMENSIONS=1536
-```
-
-Optional email settings (SMTP delivery rather than logging):
-
-```env
-EMAIL_HOST=smtp.example.com
-EMAIL_PORT=587
-EMAIL_HOST_USER=user@example.com
-EMAIL_HOST_PASSWORD=secret
-EMAIL_USE_TLS=True
-```
-
-3. Build and run:
+### 2. Configure environment
 
 ```bash
-docker compose up --build
+cp .env.example .env
 ```
 
-This starts Postgres (with the `pgvector` extension image), Redis, the Django app (`web`), the Gradio demo chat frontend (`gradio`), and the Celery worker + beat scheduler. `python manage.py migrate` (including enabling the `pgvector` Postgres extension) runs automatically on `web`'s startup — no manual database setup needed.
+Then set `OPENAI_API_KEY` (required for the AI assistant and knowledge base). Everything else in `.env.example` has a working default for local development.
 
-If you install dependencies outside Docker, make sure `python-json-logger` from `requirements.txt` is installed so Django can load the JSON log formatter, and that Postgres has the `pgvector` extension available (the `pgvector/pgvector:pg15` image already includes it).
+### 3. Development vs Production
 
-`entrypoint.sh` handles:
-* waiting for Postgres on `db:5432`
-* `python manage.py migrate`
-* `python manage.py runserver 0.0.0.0:8000`
+The project runs in two modes from the same codebase and the same Docker images — which one you get is controlled entirely by `.env`.
 
-### Settings Modules
-
-The project uses split Django settings:
-
-* `core.settings.base`
-* `core.settings.dev`
-* `core.settings.prod`
-
-Default local entry points (`manage.py`, `wsgi.py`, `asgi.py`, and `celery.py`) use:
+**Development** (default):
 
 ```env
 DJANGO_SETTINGS_MODULE=core.settings.dev
+DJANGO_WS_HOST=localhost:8000
 ```
 
-To run with production settings, set:
+```bash
+docker compose up -d --build
+```
+
+Starts Postgres (`pgvector` + `pg_trgm` enabled), Redis, the Django app (`web`), the Gradio demo chat (`gradio`), and Celery worker + beat. `web` runs `manage.py runserver` with autoreload and serves its own static files. `nginx` is **not** started in this mode.
+
+**Production**:
 
 ```env
 DJANGO_SETTINGS_MODULE=core.settings.prod
+SECRET_KEY=<a real random secret — the app refuses to start without one>
+ALLOWED_HOSTS=your-domain.com
+DJANGO_WS_HOST=your-domain.com
 ```
 
-Production hosts are loaded from the `ALLOWED_HOSTS` environment variable as a comma-separated list.
-
-Example:
-
-```env
-DJANGO_SETTINGS_MODULE=core.settings.prod
-ALLOWED_HOSTS=example.com,www.example.com,api.example.com
+```bash
+docker compose --profile prod up -d --build
 ```
 
-4. Create superuser (optional):
+`--profile prod` is what additionally starts `nginx`. `entrypoint.sh` runs `collectstatic` and starts the app under uvicorn with multiple worker processes; `nginx` serves collected static files directly and reverse-proxies HTTP and WebSocket traffic to `web`. `DEBUG` is hardcoded off in `core.settings.prod` regardless of any environment value.
+
+Switching between modes only needs a container recreate (`docker compose up -d --force-recreate web`), never a rebuild — rebuilds (`--build`) are only needed after changing `requirements.txt`, the `Dockerfile`, or `entrypoint.sh`.
+
+### 4. Create superuser (optional)
 
 ```bash
 docker compose exec web python manage.py createsuperuser
 ```
 
-5. Open:
-* App: `http://localhost:8000`
-* Admin: `http://localhost:8000/admin`
-* AI Assistant demo chat (Gradio): `http://localhost:7860`
+### 5. Open
 
-6. Import Postman collection and environment:
-* Open Postman and import `EventOps.postman_collection.json` and `event_ops.postman_environment.json`
-* Set the environment to `event_ops` and update the base URL to `http://localhost:8000` if needed.
-* The bundled environment also includes starter values for `admin`, `organizer`, `user`, booking IDs, and workflow-job filters that you can adjust for your local data.
+**Development:** app/admin at `http://localhost:8000`, AI assistant demo at `http://localhost:7860`.
+
+**Production:** app/admin through Nginx at `http://localhost` (port 80), AI assistant demo at `http://localhost:7860`.
+
+### 6. Postman
+
+Import `EventOps.postman_collection.json` and `event_ops.postman_environment.json`, set the environment to `event_ops`, and adjust the base URL if needed. The environment includes starter values for `admin`/`organizer`/`user` credentials and common IDs.
 
 ---
 
 ## 🔜 Future Enhancements
 
-* Concurrent (parallelized) LLM tool calls, currently constrained to one call at a time (`parallel_tool_calls=False`)
+* Concurrent (parallelized) LLM tool calls, currently constrained to one call at a time
 * Semantic response caching for the AI assistant
-* Real cost tracking (a pricing table on top of the existing token-usage data — OpenAI's API doesn't return cost directly)
-* Deeper automated test coverage for the venues, knowledge, and ai_assistant apps (currently thinner than bookings/payments/events/workflows)
-* Horizontal scaling support
-* API docs and endpoint discovery
+* A warm-up request against the OpenAI client at worker startup, to absorb first-request connection setup cost
+* Real cost tracking on top of the existing token-usage data
+* Deeper automated test coverage for the venues and knowledge apps
+* Horizontal scaling: remove the remaining Docker Compose constraints and add multi-instance reverse-proxy configuration
+* Auto-generated API documentation (OpenAPI/Swagger)
 
 ---

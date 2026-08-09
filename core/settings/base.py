@@ -4,10 +4,17 @@ Settings shared by every environment.
 This project splits settings into base.py (this file) + one file per
 environment (dev.py, prod.py) that does `from .base import *` and then
 overrides only what differs — database engine, DEBUG, allowed hosts, etc.
-`core/settings/__init__.py` decides which environment file is actually
-loaded. Put anything that should be identical everywhere here; put
-environment-specific values (like dev.py's SQLite fallback) in the
-environment file instead.
+Which environment file is actually loaded is decided entirely by
+DJANGO_SETTINGS_MODULE (manage.py/wsgi.py/asgi.py/celery.py all default
+it to core.settings.dev, overridable via the environment) — NOT by
+core/settings/__init__.py, which is deliberately empty: it used to do
+`from .dev import *`, which meant importing core.settings.prod at all
+silently imported dev.py first too (Python always initializes a parent
+package before a submodule), corrupting this file's own INSTALLED_APPS
+list with dev-only apps like debug_toolbar before prod.py ever got a
+chance to read it. Put anything that should be identical everywhere
+here; put environment-specific values (like dev.py's SQLite fallback)
+in the environment file instead.
 """
 
 import os
@@ -226,6 +233,7 @@ STATIC_URL = "static/"
 # package, not a Django app), so its own static/ folder wouldn't be
 # discovered otherwise.
 STATICFILES_DIRS = [BASE_DIR / "static"]
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 AUTH_USER_MODEL = "users.User"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

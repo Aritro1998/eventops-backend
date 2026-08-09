@@ -30,6 +30,7 @@ browser *when* to connect (see active_seat_event_id's .change() handler
 below), the live painting happens independently of Gradio's render loop.
 """
 
+import os
 import json
 import gradio as gr
 import requests
@@ -39,12 +40,17 @@ from html import escape
 
 DJANGO_STREAM_API_URL = "http://web:8000/api/ai-assistant/chat/stream/"
 # "web:8000" above only resolves inside Docker's own network, which is
-# fine for requests.post() calls made from this Python process — but the
-# seat-picker WebSocket is opened directly by the browser's own JS, which
-# runs on the user's host machine and has no idea what "web" means. It
-# needs the same host:port docker-compose actually publishes for the
-# Django service (see docker-compose.yml's "8000:8000" port mapping).
-DJANGO_WS_HOST = "localhost:8000"
+# fine for requests.post() calls made from this Python process - it's an
+# internal container-to-container call, unaffected by whatever's public.
+#
+# DJANGO_WS_HOST is different: the seat-picker WebSocket is opened
+# directly by the browser's own JS, which runs on the user's host machine
+# and has no idea what "web" means - it needs whatever host:port is
+# actually publicly reachable. That's dev's web:8000 mapping today, but
+# becomes nginx's port once nginx fronts prod (see docker-compose.yml's
+# nginx service) - env-configurable rather than hardcoded so switching
+# environments is a .env change, not a code change.
+DJANGO_WS_HOST = os.getenv("DJANGO_WS_HOST", "localhost:8000")
 CONFIRM_DRAFT_URL = (
     "http://web:8000/api/ai-assistant/actions/confirm-pending-booking/"
 )

@@ -51,8 +51,14 @@ if not os.getenv("DB_NAME"):
     REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["default"] = "10000/min"
 
 # django-debug-toolbar, dev-only — shows SQL queries, request timing, etc.
-# as an overlay in the browser. Never enabled in prod.py.
-INSTALLED_APPS += [
+# as an overlay in the browser. Never enabled in prod.py. Rebinds to a new
+# list (not +=) so this can never mutate base.py's own INSTALLED_APPS list
+# object in place - += would, and since Python modules are cached in
+# sys.modules, that mutation would silently leak into any other settings
+# module (e.g. prod.py) that happens to import base.py in the same process,
+# regardless of which one is actually active. Same reasoning MIDDLEWARE
+# below already followed.
+INSTALLED_APPS = INSTALLED_APPS + [
     "debug_toolbar",
 ]
 

@@ -26,6 +26,7 @@ services:
       - .env
     volumes:
       - .:/app
+      - static_files:/app/staticfiles
     ports:
       - "8000:8000"
     depends_on:
@@ -36,6 +37,8 @@ services:
     build: .
     container_name: eventops_gradio
     command: python gradio_app.py
+    env_file:
+      - .env
     volumes:
       - .:/app
     ports:
@@ -72,6 +75,21 @@ services:
       - redis
       - db
 
-# volumes for postgres data persistence
+  nginx:
+    image: nginx:alpine
+    container_name: eventops_nginx
+    profiles: ["prod"]
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - static_files:/app/staticfiles:ro
+    depends_on:
+      - web
+
+# volumes for postgres data persistence + collectstatic output (kept
+# inside a Docker-managed volume rather than the .:/app bind mount, so
+# static files never land on the host filesystem)
 volumes:
   postgres_data:
+  static_files:
