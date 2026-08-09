@@ -67,7 +67,7 @@ This architecture is designed to provide:
 
 1. The client opens a streaming chat session at `POST /api/ai-assistant/chat/stream/` (Server-Sent Events over an async Django view, using the async ORM directly — no `sync_to_async` wrapping the whole request).
 2. The assistant runs a LangChain tool-calling loop (`gpt-4o-mini` via `ChatOpenAI`, `parallel_tool_calls=False`, up to 5 tool calls per turn) with tools for searching events, checking seat availability, querying the RAG knowledge base, and reading a user's bookings.
-3. Anything destructive — creating a booking, cancelling one, retrying a payment — never executes directly from a tool call. A new booking or a payment retry pauses a dedicated LangGraph graph (`ai_assistant/langgraph_flows/`) via `interrupt()`; a cancellation stages a `PendingBookingCancellation` row. Either way, only a separate, explicit confirm endpoint actually resumes the graph or calls into `BookingService`/`PaymentService`. Unconfirmed drafts expire automatically via the same Celery/`WorkflowJob` cleanup pattern used for booking holds.
+3. Anything destructive — creating a booking, cancelling one, retrying a payment — never executes directly from a tool call. Each one pauses its own dedicated LangGraph graph (`ai_assistant/langgraph_flows/`) via `interrupt()`, with a lightweight marker row (`PendingBookingThread` / `PendingBookingCancellation` / `PendingPaymentRetry`) pointing at whichever paused thread is currently relevant — the actual draft state lives in the graph's own checkpoint, not the row. Cancellation runs an additional two-step "are you sure" confirmation inside its graph before anything is touched. Only a separate, explicit confirm endpoint ever resumes a graph or calls into `BookingService`/`PaymentService`. Unconfirmed drafts expire automatically via the same Celery/`WorkflowJob` cleanup pattern used for booking holds.
 4. Every read tool (event search, seat availability) goes through the **same cached service functions** the REST API uses (`events/caching.py`), so the AI and the API can never show inconsistent data or double the cache-warming cost.
 5. Every OpenAI call is logged to `UsageLog` — prompt/completion/system-prompt token counts (via `tiktoken`) and which tool (if any) was invoked — surfaced in a custom Django admin analytics view.
 
@@ -95,6 +95,7 @@ This architecture is designed to provide:
 * Used Redis for caching, the Celery broker/result backend, **and** the Channels layer for WebSockets
 * Combined database constraints, targeted indexes, and a composite workflow index for data integrity and query efficiency
 * Consolidated cache invalidation and WebSocket broadcasting into `Booking.release_seats()` itself, instead of repeating both calls at every call site that can release a seat (cancellation, expiry, payment failure) — a real bug (two call sites silently missing invalidation) surfaced and was fixed by making this the single owner of that side effect
+* Added `PendingPaymentRetry` as a marker row (mirroring `PendingBookingThread`), after testing surfaced a real bug: guessing "the most recent FAILED booking" for a payment retry silently resolved to the wrong one once a user had more than one failed booking at once
 * Unified the REST API and the AI assistant's event/seat reads onto one cached service layer (`events/caching.py`) rather than the AI hitting the database uncached on every tool call
 * Kept destructive AI actions behind an explicit human-confirmed draft (`Pending*` models) instead of letting the model call booking/cancellation/payment mutations directly
 * Layered Django admin's own permission system with the app's business `role` field: a `post_save` signal keeps every `ORGANIZER` user's Group membership in sync automatically, and `EventAdmin`/`SeatAdmin` add object-level ownership checks on top — so an organizer with admin access can only ever touch events they created, matching the same rule already enforced on the API (`IsAdminOrOrganizer`)
@@ -116,7 +117,7 @@ This architecture is designed to provide:
 * Key workflows emit logs for booking creation, payment outcomes, cache invalidation, workflow execution, retries, and failures
 * `WorkflowJob` tracks async lifecycle state including `status`, `retry_count`, `last_error`, `started_at`, `completed_at`, and `result`
 * Admin APIs expose failed jobs, stuck jobs, and retry actions for operational recovery
-* `UsageLog` records prompt/completion/system-prompt tokens and the tool invoked for every OpenAI API call; a custom Django admin changelist view aggregates this into per-model and per-day token totals plus system-prompt-overhead percentage, scoped to whatever filter is active
+* `UsageLog` records prompt/completion/system-prompt tokens and the tool invoked for every OpenAI API call — chat completions and the knowledge base's embedding calls alike; a custom Django admin changelist view aggregates this into per-model and per-day token totals plus system-prompt-overhead percentage, scoped to whatever filter is active, and labels each row "Chat" or "Embedding" so spend on the two is easy to tell apart
 
 ---
 
@@ -161,6 +162,7 @@ This architecture is designed to provide:
 * Reads share the same Redis-cached service layer as the REST API — no separate, uncached data path for the AI
 * Per-call OpenAI usage (tokens, system-prompt overhead, tool invoked) logged to `UsageLog` with an admin analytics dashboard
 * A minimal LLM eval harness (`ai_assistant/evals/`) runs real prompts through the actual `chat_stream` code path and asserts on tool calls and response content — not mocks, the same reliability-testing approach used to catch two real intermittent tool-selection bugs during development
+* The demo chat's quick-action suggestions blend a small, state-driven deterministic slot (e.g. "Book seats for X" once an event is selected) with AI-generated suggestions for the rest — the model is told which slots are already decided so it doesn't duplicate them, and is instructed to name real events from the conversation instead of generic placeholders
 
 ### ✅ Knowledge Base (RAG)
 
