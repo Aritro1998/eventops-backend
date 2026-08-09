@@ -1,19 +1,24 @@
 """
 Celery task definitions. process_workflow_job is the actual worker for
 WorkflowJob rows (dispatches by job_type to the handle_* functions at the
-bottom of this file); the four *_task functions below it are what
-CELERY_BEAT_SCHEDULE (core/settings/base.py) fires every 5 minutes —
-requeue_pending_jobs_task recovers stuck WorkflowJobs, the three
-cleanup_expired_* tasks garbage-collect the AI assistant's
+bottom of this file); the five *_task functions below it are what
+CELERY_BEAT_SCHEDULE (core/settings/base.py) fires on their own
+schedules — requeue_pending_jobs_task recovers stuck WorkflowJobs, the
+three cleanup_expired_* tasks garbage-collect the AI assistant's
 PendingBookingThread/PendingBookingCancellation/PendingPaymentRetry rows
-that nobody confirmed in time. None of these delete the underlying
-LangGraph checkpoint itself (booking_graph/payment_retry_graph/
-cancel_booking_graph's own Postgres tables) - only the marker row that
-points at it; that's a known, separate gap, see checkpointer.py.
+that nobody confirmed in time, and cleanup_expired_langgraph_checkpoints_task
+deletes the underlying LangGraph checkpoint data those three leave behind
+(booking_graph/payment_retry_graph/cancel_booking_graph's own Postgres
+tables) — a marker row only ever expires on its own short, booking-hold
+timescale, so the checkpoint cleanup runs independently on a longer age
+cutoff instead of tracking each marker type's own expiry (see
+cleanup_expired_langgraph_checkpoints_task's own docstring, and
+checkpointer.py).
 """
 
 import logging
 
+from datetime import timedelta
 from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
@@ -237,6 +242,48 @@ def cleanup_expired_pending_payment_retries_task():
     return deleted_count
 
 
+@shared_task
+def cleanup_expired_langgraph_checkpoints_task():
+    """
+    Delete LangGraph checkpoint data for threads whose most recent
+    checkpoint is older than the cutoff below - the counterpart to the
+    three cleanup_expired_pending_* tasks above, which only ever delete
+    the marker row pointing at a checkpoint, never the checkpoint itself
+    (see this module's own docstring, and checkpointer.py).
+    """
+    from django.db import connections
+    from ai_assistant.langgraph_flows.checkpointer import get_checkpointer
+
+    cutoff= timezone.now() - timedelta(hours=24)
+    
+    with connections['default'].cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT thread_id
+            FROM checkpoints
+            GROUP BY thread_id
+            HAVING MAX((checkpoint->>'ts')::timestamptz) < %s
+            """,
+            [cutoff],
+        )
+        stale_thread_ids = [row[0] for row in cursor.fetchall()]
+        
+    checkpointer = get_checkpointer()
+    
+    for thread_id in stale_thread_ids:
+        checkpointer.delete_thread(thread_id)
+        
+    logger.info(
+        "expired_langgraph_checkpoints_cleaned",
+        extra={
+            "event": "expired_langgraph_checkpoints_cleaned",
+            "deleted_count": len(stale_thread_ids),
+        }
+    )
+    
+    return len(stale_thread_ids)
+
+
 def handle_booking_confirmation(job):
     """
     Handle email sending for booking confirmation.
@@ -431,4 +478,3 @@ def handle_knowledge_chunking(job):
     document_id = job.payload.get("document_id")
     document = KnowledgeDocument.objects.get(id=document_id)
     KnowledgeService.sync_chunks(document)
-    

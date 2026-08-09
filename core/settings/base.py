@@ -161,6 +161,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "workflows.tasks.cleanup_expired_pending_payment_retries_task",
         "schedule": crontab(minute="*/5"),
     },
+        "cleanup-expired-langgraph-checkpoints": {
+        "task": "workflows.tasks.cleanup_expired_langgraph_checkpoints_task",
+        "schedule": crontab(minute=0, hour="*/6"),
+    },
 }
 
 # Channels config, used for WebSocket support. The `channels_redis`
