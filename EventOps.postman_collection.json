@@ -779,35 +779,6 @@
           "response": []
         }
       ]
-    },
-    {
-      "name": "AI_Assistant",
-      "request": {
-        "method": "POST",
-        "header": [],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n    \"message\": \"Hello\"\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        },
-        "url": {
-          "raw": "{{base_url}}/api/ai-assistant/chat/",
-          "host": [
-            "{{base_url}}"
-          ],
-          "path": [
-            "api",
-            "ai-assistant",
-            "chat",
-            ""
-          ]
-        }
-      },
-      "response": []
     }
   ],
   "event": [
