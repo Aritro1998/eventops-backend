@@ -108,7 +108,7 @@ This architecture is designed to provide:
 * Added a concurrency test with parallel booking attempts to verify that at most one booking reaches `CONFIRMED` for the same seat
 * Enforced uniqueness for confirmed seat bookings at the database level as a final safety net
 * Applied DRF throttling on auth and booking endpoints to reduce abuse risk
-* Fuzzy event-name search (`rapidfuzz`) so the AI assistant can resolve a misspelled or partial event name to the right event
+* Fuzzy event-name search runs as a single indexed Postgres query (`pg_trgm` + a GIN trigram index + `TrigramWordSimilarity`) so the AI assistant can resolve a misspelled or partial event name to the right event without scanning every row in Python
 * Capped Celery worker concurrency explicitly (`--concurrency=2`) after profiling showed the CPU-count default (10 workers) spawning far more full Django-loaded processes than local task volume ever needed
 
 ## 📊 Observability
@@ -326,7 +326,6 @@ docker compose exec web python manage.py createsuperuser
 
 ## 🔜 Future Enhancements
 
-* Trigram/vector-based fuzzy event search (`pg_trgm` or embedding-based) to replace the current in-memory `rapidfuzz` scan as the event catalog grows
 * Concurrent (parallelized) LLM tool calls, currently constrained to one call at a time (`parallel_tool_calls=False`)
 * Semantic response caching for the AI assistant
 * Real cost tracking (a pricing table on top of the existing token-usage data — OpenAI's API doesn't return cost directly)

@@ -7,6 +7,7 @@ Seat rows.
 
 from django.db import models
 from django.db.models import Q, F
+from django.contrib.postgres.indexes import GinIndex
 
 from users.models import User
 from venues.models import Venue, Space
@@ -116,6 +117,13 @@ class Event(models.Model):
     
     class Meta:
         ordering = ['-created_at']
+        
+        # Add a GIN index on the name field for efficient trigram searches
+        # Trigram search means that the search will match substrings of the name, not just exact matches or prefixes.
+        indexes = [
+            GinIndex(fields=['name'], name='event_name_trgm_idx', opclasses=['gin_trgm_ops']),
+        ]
+        
         # Ensure total_seats is positive and end_time is after start_time
         constraints = [
             models.CheckConstraint(

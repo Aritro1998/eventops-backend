@@ -1,5 +1,4 @@
 from datetime import datetime, time
-from rapidfuzz import process, fuzz
 
 from django.db import transaction
 from django.utils import timezone
@@ -7,6 +6,7 @@ from django.utils.dateparse import parse_date
 from django.db.models import Count, Q, F
 from django.db.models.functions import Coalesce
 from rest_framework.exceptions import ValidationError
+from django.contrib.postgres.search import TrigramWordSimilarity
 from django.core.exceptions import ValidationError as DjangoValidationError
 
 from venues.models import Space
@@ -404,43 +404,19 @@ class EventService:
         ).order_by('seat_number')
 
     @staticmethod
-    def search_events_by_name(event_name):
+    def search_events_by_name(event_name, threshold=0.3):
         """
-        Fuzzy name search — the AI assistant's search_events tool uses this
-        so users can type an approximate/misspelled event name and still
-        resolve the correct event id. `score >= 80` is a WRatio threshold
-        (0-100 scale); below that, treat it as "no real match" rather than
-        returning a wrong event.
+        Fuzzy name search via Postgres pg_trgm — the AI assistant's
+        search_events tool uses this so users can type an approximate/
+        misspelled event name and still resolve the correct event id.
+        threshold is TrigramSimilarity's 0-1 scale; below it, treat as
+        "no real match" rather than returning a wrong event.
         """
-        events = list(
-            Event.objects.filter(is_archived=False).values(
-                "id",
-                "name"
-            )
-        )
-
-        if not events:
-            return Event.objects.none()
-
-        choices = {
-            event["name"]: event["id"]
-            for event in events
-        }
-
-        matches = process.extract(
-            event_name,
-            choices.keys(),
-            scorer=fuzz.WRatio,
-            limit=5
-        )
-
-        matching_ids = [
-            choices[name]
-            for name, score, _ in matches
-            if score >= 80
-        ]
-
-        return Event.objects.filter(
-            id__in=matching_ids
+        return(
+            Event.objects
+            .filter(is_archived=False)
+            .annotate(similarity=TrigramWordSimilarity(event_name, 'name'))
+            .filter(similarity__gt=threshold)
+            .order_by('-similarity')[:5]
         )
         
