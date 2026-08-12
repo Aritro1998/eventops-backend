@@ -8,6 +8,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from events.models import Event
+from events.services import EventService
 
 
 User = get_user_model()
@@ -155,3 +156,73 @@ class TestEvent(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("date", response.data)
+
+    # -------------------------
+    # FUZZY NAME SEARCH (pg_trgm)
+    # -------------------------
+    # Regression coverage for the rapidfuzz -> pg_trgm swap - this exact
+    # scenario (a short, partial/misspelled query against a name with a
+    # long subtitle) is what caught TrigramSimilarity scoring too low and
+    # required switching to TrigramWordSimilarity instead.
+
+    def test_search_events_by_name_exact_match(self):
+        event = Event.objects.create(
+            name="Oppenheimer: IMAX Re-release",
+            total_seats=100,
+            start_time=timezone.now() + timedelta(days=1),
+            end_time=timezone.now() + timedelta(days=1, hours=2),
+            created_by=self.organizer,
+            price=300,
+        )
+
+        results = EventService.search_events_by_name("Oppenheimer: IMAX Re-release")
+
+        self.assertEqual(list(results), [event])
+
+    def test_search_events_by_name_resolves_misspelling(self):
+        event = Event.objects.create(
+            name="Oppenheimer: IMAX Re-release",
+            total_seats=100,
+            start_time=timezone.now() + timedelta(days=1),
+            end_time=timezone.now() + timedelta(days=1, hours=2),
+            created_by=self.organizer,
+            price=300,
+        )
+
+        # Real typos a user hit live during development - both previously
+        # scored below TrigramSimilarity's threshold despite being an
+        # obvious match, due to the long, unrelated "IMAX Re-release"
+        # subtitle diluting the whole-string similarity score.
+        for query in ["openhimer", "opphenhimer"]:
+            with self.subTest(query=query):
+                results = EventService.search_events_by_name(query)
+                self.assertIn(event, list(results))
+
+    def test_search_events_by_name_no_match(self):
+        Event.objects.create(
+            name="Oppenheimer: IMAX Re-release",
+            total_seats=100,
+            start_time=timezone.now() + timedelta(days=1),
+            end_time=timezone.now() + timedelta(days=1, hours=2),
+            created_by=self.organizer,
+            price=300,
+        )
+
+        results = EventService.search_events_by_name("completely unrelated query")
+
+        self.assertEqual(list(results), [])
+
+    def test_search_events_by_name_excludes_archived(self):
+        Event.objects.create(
+            name="Archived Concert",
+            total_seats=100,
+            start_time=timezone.now() + timedelta(days=1),
+            end_time=timezone.now() + timedelta(days=1, hours=2),
+            created_by=self.organizer,
+            price=300,
+            is_archived=True,
+        )
+
+        results = EventService.search_events_by_name("Archived Concert")
+
+        self.assertEqual(list(results), [])

@@ -2,7 +2,7 @@ import threading
 import uuid
 from datetime import timedelta
 
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, connection
@@ -165,8 +165,73 @@ class TestBooking(TestCase):
         self.assertEqual(response1.data["id"], response2.data["id"])
 
     # -------------------------
-    # CONCURRENCY TEST
+    # EDGE CASES
     # -------------------------
+
+    def test_invalid_seat(self):
+
+        response = self.client.post("/api/bookings/", {
+            "seats": [9999],
+            "event": self.event.id,
+            "idempotency_key": str(uuid.uuid4())
+        })
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_event_seat_mismatch(self):
+
+        other_event = Event.objects.create(
+            name="Other Event",
+            total_seats=50,
+            start_time=timezone.now(),
+            end_time=timezone.now() + timedelta(hours=2),
+            created_by=self.user
+        )
+
+        response = self.client.post("/api/bookings/", {
+            "seats": [self.seat.id],
+            "event": other_event.id,
+            "idempotency_key": str(uuid.uuid4())
+        })
+
+        self.assertEqual(response.status_code, 400)
+
+
+class TestBookingConcurrency(TransactionTestCase):
+    """Split out from TestBooking specifically because this test spawns
+    real threads, each opening its own DB connection separate from the
+    main test thread's. TestCase's isolation only wraps the main thread's
+    connection in a transaction it rolls back after the test - a thread's
+    own connection isn't part of that transaction at all, so its writes
+    are real, permanent commits that survive into whatever test runs
+    next. Confirmed directly: this leaked an extra CONFIRMED booking/seat
+    into the shared test database, which broke an unrelated events test
+    (test_list_events_filters_by_start_date) purely by running in the
+    same suite, not because of anything wrong with that test itself.
+    TransactionTestCase cleans up via table truncation instead of
+    rollback, which is safe for real cross-thread commits like this one -
+    slower than TestCase, so it's kept to just this one test rather than
+    converting the whole TestBooking class."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="testuser",
+            email="testuser@example.com",
+            password="StrongPass@123"
+        )
+
+        self.event = Event.objects.create(
+            name="Test Event",
+            total_seats=100,
+            start_time=timezone.now(),
+            end_time=timezone.now() + timedelta(hours=2),
+            created_by=self.user
+        )
+
+        self.seat = Seat.objects.create(
+            event=self.event,
+            seat_number=1
+        )
 
     def test_concurrent_booking(self):
 
@@ -208,35 +273,3 @@ class TestBooking(TestCase):
         ).count()
 
         self.assertLessEqual(confirmed_count, 1)
-
-    # -------------------------
-    # EDGE CASES
-    # -------------------------
-
-    def test_invalid_seat(self):
-
-        response = self.client.post("/api/bookings/", {
-            "seats": [9999],
-            "event": self.event.id,
-            "idempotency_key": str(uuid.uuid4())
-        })
-
-        self.assertEqual(response.status_code, 400)
-
-    def test_event_seat_mismatch(self):
-
-        other_event = Event.objects.create(
-            name="Other Event",
-            total_seats=50,
-            start_time=timezone.now(),
-            end_time=timezone.now() + timedelta(hours=2),
-            created_by=self.user
-        )
-
-        response = self.client.post("/api/bookings/", {
-            "seats": [self.seat.id],
-            "event": other_event.id,
-            "idempotency_key": str(uuid.uuid4())
-        })
-
-        self.assertEqual(response.status_code, 400)
