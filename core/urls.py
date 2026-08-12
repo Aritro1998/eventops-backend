@@ -21,6 +21,11 @@ from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
 )
+from drf_spectacular.views import (
+    SpectacularAPIView,
+    SpectacularSwaggerView,
+    SpectacularRedocView,
+)
 
 from events import urls as events_urls
 from bookings import urls as bookings_urls
@@ -37,6 +42,11 @@ urlpatterns = [
     path('api/bookings/', include(bookings_urls)),
     path('api/workflows/', include(workflows_urls)),
     path('api/ai-assistant/', include(ai_assistant_urls)),
+    # Schema is generated live from the views/serializers below, not
+    # hand-maintained - see SPECTACULAR_SETTINGS in core/settings/base.py.
+    path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
+    path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
+    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
 ]
 
 if settings.DEBUG:

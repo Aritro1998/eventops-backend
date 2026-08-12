@@ -86,6 +86,7 @@ Background workflows are coordinated through a persistent `WorkflowJob` model an
 * Redis (cache, Celery broker/result backend, Channels layer)
 * Celery (worker + beat)
 * Django Channels (ASGI, WebSockets)
+* Auto-generated OpenAPI schema (drf-spectacular) with Swagger UI/ReDoc
 
 **AI integration**
 * LangChain (tool-calling agent loop)
@@ -162,6 +163,8 @@ Real problems found during development, and the design change that fixed them �
 * **Fail-fast production config** — `core.settings.prod` raises `ImproperlyConfigured` if `SECRET_KEY` isn't explicitly set, instead of silently inheriting `base.py`'s dev-only fallback key.
 * **Static files stay in Docker** — `collectstatic` output is written to a Docker-managed named volume rather than the bind-mounted project directory, so generated build artifacts never land on the host filesystem, while still being shared between the app and Nginx containers.
 * **Admin permissions mirror the API** — a `post_save` signal keeps every `ORGANIZER` user's Django Group membership in sync automatically, and `EventAdmin`/`SeatAdmin` add object-level ownership checks on top, so admin access enforces the same rule as the API (`IsAdminOrOrganizer`) instead of a separate, looser one.
+* **Multi-instance scaling, verified not just assumed** — tried `docker compose up --scale web=N` directly rather than assuming the stateless design was enough on its own, and found two concrete blockers: a fixed `container_name` (Docker refuses to scale it) and a published host port (only one replica can bind it). Nginx's static `upstream` block was a third, quieter one — it resolves Docker's internal DNS once at startup and never again, so even with multiple replicas running, every request would have kept going to whichever one it saw first. Fixed with an optional Compose overlay for the first two, and a dynamic DNS resolver in `nginx.conf` for the third — confirmed traffic actually distributes across replicas afterward, not just that the containers start.
+* **Auto-generated API docs over a hand-maintained collection** — added `drf-spectacular` specifically because the Postman collection had already drifted from reality once (a stale, 404ing endpoint, six missing ones). Most of the app's real endpoints are plain `APIView`s rather than `ModelViewSet`s, which schema generation can't introspect automatically — the first pass surfaced 52 introspection errors across 12 views. Fixed by declaring explicit request/response serializers (several already existed and just weren't wired to the schema; a few genuinely new ones for the AI assistant's ad-hoc dict responses) — down to 0 warnings, verified via the `--fail-on-warn` management command, not just "the page loads."
 
 ---
 
@@ -366,6 +369,16 @@ docker compose --profile prod up -d --build
 
 Switching between modes only needs a container recreate (`docker compose up -d --force-recreate web`), never a rebuild — rebuilds (`--build`) are only needed after changing `requirements.txt`, the `Dockerfile`, or `entrypoint.sh`.
 
+**Production, scaled to multiple `web` instances**:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.scale.yml --profile prod up -d --build --scale web=3
+```
+
+`docker-compose.scale.yml` is an optional overlay, only applied when explicitly passed with `-f` — it removes `web`'s fixed container name and published port, both of which block running more than one replica. `nginx.conf` re-resolves Docker's internal DNS on every request (`resolver 127.0.0.11 valid=10s;`) rather than caching one replica's address at startup, so traffic actually gets distributed across all of them instead of pinning to whichever one nginx happened to see first. No application code is aware of how many replicas exist — auth, chat history, and LangGraph checkpoint state all live in Redis/Postgres rather than a worker's own memory, which is what makes this safe to do without any other change.
+
+Verified directly: requests distribute across replicas (confirmed via per-container request logs), and the seat-picker WebSocket still upgrades and streams correctly through nginx with multiple replicas running behind it.
+
 ### 4. Create superuser (optional)
 
 ```bash
@@ -374,9 +387,9 @@ docker compose exec web python manage.py createsuperuser
 
 ### 5. Open
 
-**Development:** app/admin at `http://localhost:8000`, AI assistant demo at `http://localhost:7860`.
+**Development:** app/admin at `http://localhost:8000`, AI assistant demo at `http://localhost:7860`, interactive API docs at `http://localhost:8000/api/docs/` (or `/api/redoc/` for the alternate layout).
 
-**Production:** app/admin through Nginx at `http://localhost` (port 80), AI assistant demo at `http://localhost:7860`.
+**Production:** app/admin through Nginx at `http://localhost` (port 80), AI assistant demo at `http://localhost:7860`, API docs at `http://localhost/api/docs/`.
 
 ### 6. Postman
 
@@ -391,7 +404,6 @@ Import `EventOps.postman_collection.json` and `event_ops.postman_environment.jso
 * A warm-up request against the OpenAI client at worker startup, to absorb first-request connection setup cost
 * Real cost tracking on top of the existing token-usage data
 * Deeper automated test coverage for the venues and knowledge apps
-* Horizontal scaling: remove the remaining Docker Compose constraints and add multi-instance reverse-proxy configuration
-* Auto-generated API documentation (OpenAPI/Swagger)
+* A real load balancer (health checks, connection draining) in front of scaled `web` instances — the current DNS round-robin approach has neither
 
 ---

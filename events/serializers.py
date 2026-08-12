@@ -85,7 +85,7 @@ class SeatSummarySerializer(serializers.ModelSerializer):
             'label',
         ]
 
-    def get_label(self, obj):
+    def get_label(self, obj) -> str:
         return obj.display_label or str(obj.seat_number)
 
 

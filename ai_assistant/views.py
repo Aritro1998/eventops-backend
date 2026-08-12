@@ -20,6 +20,10 @@ import logging
 from .chat_state import ChatState
 from ai_assistant.services import chat_stream
 from core.throttles import BookingThrottle
+from .serializers import (
+    ActionOutcomeSerializer,
+    CancelDraftOutcomeSerializer,
+)
 
 from django.views import View
 from rest_framework import status
@@ -30,6 +34,7 @@ from rest_framework.response import Response
 from django.http import StreamingHttpResponse
 from rest_framework.exceptions import APIException
 from django.views.decorators.csrf import csrf_exempt
+from drf_spectacular.utils import extend_schema
 from django.contrib.auth.models import AnonymousUser
 from django.utils.decorators import method_decorator
 from rest_framework.permissions import IsAuthenticated
@@ -188,6 +193,7 @@ class ConfirmPendingBookingActionView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [BookingThrottle]
 
+    @extend_schema(request=None, responses=ActionOutcomeSerializer)
     def post(self, request):
         try:
             booking = confirm_pending_booking(request.user)
@@ -223,6 +229,7 @@ class CancelPendingBookingActionView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [BookingThrottle]
 
+    @extend_schema(request=None, responses=CancelDraftOutcomeSerializer)
     def post(self, request):
         try:
             result = cancel_pending_booking_draft(request.user)
@@ -247,7 +254,18 @@ class CancelPendingBookingActionView(APIView):
 class ConfirmCancellationActionView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [BookingThrottle]
-    
+
+    @extend_schema(
+        request=None,
+        responses=ActionOutcomeSerializer,
+        description=(
+            "Two-step confirm. The first call advances the cancel graph to its "
+            "'are you sure' pause and returns CancellationAwaitingConfirmSerializer's "
+            "shape instead (same 200 status, no separate documented response here since "
+            "OpenAPI can't key on business logic, only status code) - only the second "
+            "call, once resolved, returns the ActionOutcomeSerializer shape below."
+        ),
+    )
     def post(self, request):
         try:
             result = confirm_cancellation(request.user)
@@ -293,7 +311,8 @@ class ConfirmCancellationActionView(APIView):
 class DismissCancellationActionView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [BookingThrottle]
-    
+
+    @extend_schema(request=None, responses=ActionOutcomeSerializer)
     def post(self, request):
         try:
             booking = dismiss_cancellation(request.user)
@@ -319,6 +338,7 @@ class ConfirmPaymentRetryActionView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [BookingThrottle]
 
+    @extend_schema(request=None, responses=ActionOutcomeSerializer)
     def post(self, request):
         try:
             booking = confirm_payment_retry(request.user)
@@ -354,6 +374,7 @@ class DismissPaymentRetryActionView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [BookingThrottle]
 
+    @extend_schema(request=None, responses=ActionOutcomeSerializer)
     def post(self, request):
         try:
             booking = dismiss_payment_retry(request.user)

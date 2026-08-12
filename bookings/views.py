@@ -18,6 +18,7 @@ from .services import BookingService
 from core.pagination import CustomPagination
 from payments.services import PaymentService
 from core.throttles import BookingThrottle, DefaultThrottle
+from drf_spectacular.utils import extend_schema
 from .serializers import BookingWriteSerializer, BookingReadSerializer
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class BookingListView(APIView):
             return [BookingThrottle()]
         return [DefaultThrottle()]
 
+    @extend_schema(request=BookingWriteSerializer, responses=BookingReadSerializer)
     def post(self, request):
         """
         Create a booking with:
@@ -102,6 +104,7 @@ class BookingListView(APIView):
             status=status.HTTP_200_OK if is_existing else status.HTTP_201_CREATED
         )
 
+    @extend_schema(responses=BookingReadSerializer(many=True))
     def get(self, request):
         """
         List bookings for the authenticated user.
@@ -144,6 +147,7 @@ class BookingDetailView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(responses=BookingReadSerializer)
     def get(self, request, booking_id):
         booking = BookingService.get_booking_for_user(booking_id, request.user)
         if booking is None:
@@ -164,6 +168,7 @@ class BookingCancelView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [BookingThrottle]
 
+    @extend_schema(request=None, responses=BookingReadSerializer)
     def post(self, request, booking_id):
 
         booking = BookingService.get_booking_for_user(booking_id, request.user)
@@ -204,6 +209,7 @@ class BookingRetryPaymentView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [BookingThrottle]
 
+    @extend_schema(request=None, responses=BookingReadSerializer)
     def post(self, request, booking_id):
 
         booking = BookingService.get_booking_for_user(booking_id, request.user)

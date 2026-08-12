@@ -5,7 +5,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 
 from core.throttles import AuthThrottle
-from .serializers import RegisterSerializer
+from drf_spectacular.utils import extend_schema
+from .serializers import RegisterSerializer, RegisterResponseSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,7 @@ class RegisterView(APIView):
 
     throttle_classes = [AuthThrottle]
 
+    @extend_schema(request=RegisterSerializer, responses=RegisterResponseSerializer)
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
 

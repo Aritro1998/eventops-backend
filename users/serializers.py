@@ -4,6 +4,17 @@ from django.contrib.auth.password_validation import validate_password
 
 from .models import User
 
+
+class RegisterResponseSerializer(serializers.Serializer):
+    """RegisterView's actual response shape — a small ad-hoc dict, not
+    RegisterSerializer's own output (which would include the write-only
+    password field awkwardly), so this is declared purely for schema
+    generation rather than reused as a real serializer anywhere."""
+    message = serializers.CharField()
+    username = serializers.CharField()
+    email = serializers.EmailField()
+
+
 class RegisterSerializer(serializers.ModelSerializer):
     """Public self-registration. Always creates a plain 'USER' — there is
     no API path to register as ADMIN/ORGANIZER; those roles are assigned

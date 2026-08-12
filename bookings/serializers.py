@@ -97,12 +97,12 @@ class BookingReadSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-    def get_is_general_admission(self, obj):
+    def get_is_general_admission(self, obj) -> bool:
         return obj.seat_display()["is_general_admission"]
 
-    def get_seat_labels(self, obj):
+    def get_seat_labels(self, obj) -> list[str]:
         return obj.seat_display()["seat_labels"]
 
-    def get_seat_count(self, obj):
+    def get_seat_count(self, obj) -> int:
         return obj.seat_display()["seat_count"]
         

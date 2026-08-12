@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "drf_spectacular",
     "django_filters",
     "rest_framework_simplejwt",
     "channels",
@@ -126,6 +127,20 @@ REST_FRAMEWORK = {
         "auth": "10/min",
         "default": "100/min",
     },
+    # Schema generated straight from the real views/serializers (see
+    # SPECTACULAR_SETTINGS below) rather than hand-maintained docs - the
+    # Postman collection drifting out of sync with the actual endpoints
+    # is exactly the failure mode this avoids.
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+}
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "EventOps API",
+    "DESCRIPTION": "Event management and seat booking API, with an AI assistant built on LangChain/LangGraph.",
+    "VERSION": "1.0.0",
+    # The schema itself stays served at /api/schema/; Swagger UI/ReDoc
+    # just render it, they don't need their own copy.
+    "SERVE_INCLUDE_SCHEMA": False,
 }
 
 SIMPLE_JWT = {

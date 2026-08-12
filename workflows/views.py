@@ -22,6 +22,7 @@ from workflows.models import WorkflowJob, STUCK_IN_PROGRESS_THRESHOLD
 from rest_framework.views import APIView
 from core.permissions import IsRoleAdmin
 from rest_framework.response import Response
+from drf_spectacular.utils import extend_schema
 from workflows.tasks import process_workflow_job
 from workflows.serializers import WorkflowJobSerializer
 
@@ -135,6 +136,7 @@ class RetryJobView(APIView):
     """
     permission_classes = [IsRoleAdmin]
 
+    @extend_schema(request=None, responses=WorkflowJobSerializer)
     def post(self, request, job_id):
 
         job = get_object_or_404(WorkflowJob, id=job_id)
