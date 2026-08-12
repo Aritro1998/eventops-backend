@@ -264,7 +264,9 @@ Reference detail for each area — see [Backend Design Highlights](#backend-desi
 
 Two separate things, run separately — deterministic unit/integration tests for the transactional backend, and behavioral evals for the LLM-driven assistant (an LLM's correctness can't be asserted the same way a plain function's can — the same prompt at `temperature=0` can still occasionally take a different tool-calling path).
 
-A concurrency test fires 10 simultaneous booking requests for the same seat via real threads and verifies exactly one reaches `CONFIRMED` — checked against the database state directly, not just response codes.
+A concurrency test fires 10 simultaneous booking requests for the same seat via real threads and verifies exactly one reaches `CONFIRMED` — checked against the database state directly, not just response codes. It runs in its own `TransactionTestCase`, since its threads open real DB connections that a plain `TestCase`'s rollback-per-test isolation can't clean up after.
+
+The full suite also runs in CI via GitHub Actions on every push to `main` and every pull request (Postgres + Redis service containers, same test command as below), and can be triggered manually from the Actions tab.
 
 ```bash
 # Run the full Django test suite
@@ -290,7 +292,7 @@ docker compose exec web python manage.py generate_knowledge_embeddings
 docker compose exec web python manage.py generate_knowledge_embeddings --document-id <id>
 ```
 
-Test suites cover bookings, payments, events, and workflows in depth, with growing coverage for the AI assistant; venues and knowledge currently have thinner automated coverage — the AI assistant relies on its eval harness for behavioral coverage instead.
+Test suites cover bookings, payments, events, venues, knowledge, and workflows, with growing coverage for the AI assistant — the AI-calling parts of the knowledge service (embedding/search) are deliberately left to the eval harness instead, since they need a real `OPENAI_API_KEY` and aren't deterministic unit-test material.
 
 ---
 
