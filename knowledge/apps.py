@@ -6,4 +6,4 @@ class KnowledgeConfig(AppConfig):
     name = 'knowledge'
     
     def ready(self):
-        import knowledge.signals
+        import knowledge.signals  # noqa: F401

@@ -1,0 +1,5 @@
+[tool.ruff.lint.per-file-ignores]
+# The dev/prod settings split relies on `from .base import *` - Ruff can't
+# tell that names like BASE_DIR or REST_FRAMEWORK come from that import.
+"core/settings/dev.py" = ["F403", "F405"]
+"core/settings/prod.py" = ["F403", "F405"]

@@ -52,6 +52,20 @@ jobs:
             -   name: Install dependencies
                 run: pip install -r requirements.txt
 
+            -   name: Lint with Ruff
+                run: ruff check .
+
+            -   name: Security audit dependencies
+                # continue-on-error: the remaining known CVEs here (pytest,
+                # the langchain/langgraph stack) only have major-version
+                # fixes available - bumping them needs a deliberate,
+                # separate pass to re-verify the AI assistant end-to-end,
+                # not a silent dependency bump. Keeping this step non-
+                # blocking preserves visibility without failing every build
+                # on issues we're not fixing yet.
+                continue-on-error: true
+                run: pip-audit -r requirements.txt
+
             -   name: Run migrations
                 run: python manage.py migrate
 

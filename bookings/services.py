@@ -361,8 +361,6 @@ class BookingService:
         if booking.status != "CONFIRMED":
             raise ValueError("Only CONFIRMED bookings can be CANCELLED.")
 
-        event_id = booking.event_id
-
         with transaction.atomic():
             booking.status = "CANCELLED"
             booking.save(update_fields=["status", "updated_at"])

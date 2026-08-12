@@ -19,7 +19,8 @@ real Postgres. When in doubt about which one you're touching, always
 prefer `docker exec eventops_web python manage.py ...`.
 """
 
-import os, socket
+import os
+import socket
 
 from .base import *
 
